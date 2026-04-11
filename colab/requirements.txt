@@ -1,0 +1,18 @@
+# CASE Personaplex Server Requirements
+# Install in Google Colab with GPU runtime
+
+# Core dependencies
+websockets>=12.0
+numpy>=1.24.0
+pyngrok>=7.0.0
+
+# Personaplex (Moshi) - Install from source
+# git+https://github.com/kyutai-labs/moshi.git
+
+# Audio processing
+soundfile>=0.12.0
+librosa>=0.10.0
+
+# Utilities
+aiofiles>=23.0.0
+python-dotenv>=1.0.0
