@@ -47,7 +47,7 @@ import sounddevice as sd
 import numpy as np
 
 # ── Configuration — must match audio_stream.ino ───────────────
-BAUD_RATE      = 921600     # High baud for 16 kHz stream
+BAUD_RATE      = 460800     # 460800 is reliable on macOS CP2102; 921600 causes framing errors
 SAMPLE_RATE    = 16000      # Hz
 BUFFER_SAMPLES = 256        # Samples per serial packet
 PACKET_BYTES   = BUFFER_SAMPLES * 2  # 2 bytes per int16 sample
@@ -128,7 +128,7 @@ def main() -> None:
 
     # ── Open serial ───────────────────────────────────────
     try:
-        ser = serial.Serial(port, BAUD_RATE, timeout=2)
+        ser = serial.Serial(port, BAUD_RATE, timeout=0.1)
     except serial.SerialException as e:
         print(f"ERROR: Cannot open {port}: {e}")
         print()
@@ -139,24 +139,40 @@ def main() -> None:
         sys.exit(1)
 
     print(f"Serial port opened: {port}")
-    print("Waiting for ESP32 to boot… (2 s)")
-    time.sleep(2)
-    ser.flushInput()
 
-    # ── Handshake ─────────────────────────────────────────
+    # ── Reconnect handshake ────────────────────────────────
+    time.sleep(0.05)              # let any in-flight bytes arrive
+    ser.reset_input_buffer()      # discard audio data / boot garbage
+    ser.write(b'R')               # signal ESP32 to announce itself
+
+    # ── Handshake — scan raw bytes for the magic string ───
     print("Waiting for handshake (AUDIO_STREAM_READY)…")
     deadline = time.time() + 10
     got_ready = False
+    buf = bytearray()
     while time.time() < deadline:
         try:
-            line = ser.readline().decode("utf-8", errors="ignore").strip()
-        except Exception:
+            chunk = ser.read(64)
+        except Exception as e:
+            print(f"\n  [handshake read error: {e}]")
             break
-        if line:
-            print(f"  ESP32: {line}")
-        if "AUDIO_STREAM_READY" in line:
+        if not chunk:
+            continue
+        buf.extend(chunk)
+        # Always check accumulated buf BEFORE potentially resetting it —
+        if b"AUDIO_STREAM_READY" in buf:
+            ser.write(b'G')   # GO — ESP32 exits handshake and starts streaming
             got_ready = True
             break
+        # Print complete lines for visibility
+        if b'\n' in buf:
+            for ln in buf.split(b'\n')[:-1]:   # all but the incomplete tail
+                text = ln.decode("utf-8", errors="ignore").strip()
+                if text and text.isprintable():
+                    print(f"  ESP32: {text}")
+            buf = bytearray(buf.split(b'\n')[-1])  # keep incomplete tail
+        if len(buf) > 512:
+            buf = buf[-512:]
 
     if not got_ready:
         print()
