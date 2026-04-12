@@ -51,7 +51,7 @@
 // ── Audio parameters ───────────────────────────────────────
 #define SAMPLE_RATE     16000     // Hz
 #define READ_SAMPLES    512       // Samples per loop iteration
-#define MIC_GAIN        4         // Amplify quiet INMP441 signal (1 = unity)
+#define MIC_GAIN        1        // Amplify quiet INMP441 signal (1 = unity)
 
 // ── Handles ────────────────────────────────────────────────
 static i2s_chan_handle_t       rx_chan;
@@ -74,16 +74,10 @@ void setup() {
     Serial.println();
 
     // ── 1. Create I2S RX channel ──────────────────────────
-    // Must use I2S_NUM_0 explicitly — the DAC continuous driver
-    // internally occupies I2S1 for DMA on ESP32. If AUTO picks
-    // I2S1 first, dac_continuous_new_channels() fails with
-    // ESP_ERR_NOT_FOUND (no DMA peripheral available).
-    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, NULL, &rx_chan));
 
-   // ── 2. Configure standard Philips I2S for INMP441 ─────
-    // INMP441: 24-bit audio, left-aligned in 32-bit slot.
-    // L/R = GND → data appears on the LEFT slot.
+    // ── 2. Configure standard Philips I2S for INMP441 ─────
     i2s_std_config_t std_cfg = {
         .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
@@ -107,9 +101,7 @@ void setup() {
     Serial.println("OK: Microphone   (INMP441 — GPIO 32 / 15 / 4)");
 
     // ── 3. Configure DAC continuous output on GPIO 25 ─────
-    // DAC_CHANNEL_MASK_CH0 = GPIO 25 on ESP32.
-    // APLL clock source is required for 16 kHz on ESP32
-    // (the default APB clock supports ≥ ~19.6 kHz only).
+
     dac_continuous_config_t dac_cfg = {
         .chan_mask = DAC_CHANNEL_MASK_CH0,       // GPIO 25
         .desc_num  = 8,
@@ -145,10 +137,7 @@ void loop() {
     int samples = (int)(bytesRead / sizeof(int32_t));
 
     // 2. Convert 32-bit I2S → 8-bit unsigned for DAC
-    //    INMP441: 24-bit audio in the top 24 bits of each int32.
-    //    >> 24 → signed 8-bit  (-128 … +127)
-    //    × gain → clamped to (-128 … +127)
-    //    + 128  → unsigned 8-bit (0 … 255) centred at mid-scale
+
     for (int i = 0; i < samples; i++) {
         int32_t s = (int32_t)micBuf[i] >> 24;
         s = constrain(s * MIC_GAIN, -128, 127);

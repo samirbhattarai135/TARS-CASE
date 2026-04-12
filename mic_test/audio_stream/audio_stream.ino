@@ -24,7 +24,15 @@
  *  Format:  Binary — signed int16, little-endian
  *  Rate:    16 000 samples/sec
  *  Packet:  256 samples = 512 bytes per write()
- *  Handshake: prints "AUDIO_STREAM_READY\n" before binary data
+ *
+ * HANDSHAKE (called at startup AND on reconnect):
+ *  1. ESP32 prints "AUDIO_STREAM_READY\n" every 500 ms
+ *  2. Python sends 'G' → ESP32 starts streaming
+ *
+ * RECONNECT (no physical reset needed):
+ *  Python sends 'R' while streaming → ESP32 re-runs handshake.
+ *  play_audio.py always sends 'R' on connect so it works whether
+ *  the ESP32 just booted or was already streaming from a prior run.
  *
  * USAGE:
  *  1. Upload this sketch
@@ -41,12 +49,30 @@
 
 // ── Audio / serial parameters ──────────────────────────────
 #define SAMPLE_RATE     16000   // Must match play_audio.py
-#define BAUD_RATE       921600  // Must match play_audio.py
+#define BAUD_RATE       460800  // Must match play_audio.py — 115200 is too slow; 921600 unreliable on macOS CP2102
 #define BUFFER_SAMPLES  256     // Samples per serial packet
 
 static i2s_chan_handle_t rx_chan;
 static int32_t i2sBuf[BUFFER_SAMPLES];
 static int16_t outBuf[BUFFER_SAMPLES];
+
+// ── Handshake ──────────────────────────────────────────────
+void waitForGo() {
+    while (Serial.available()) Serial.read();   // flush stale RX
+    uint32_t lastAnnounce = 0;
+    while (true) {
+        if (millis() - lastAnnounce >= 500) {
+            Serial.println("AUDIO_STREAM_READY");
+            lastAnnounce = millis();
+        }
+        if (Serial.available()) {
+            int b = Serial.read();
+            if (b == 'G') break;   // GO — start / resume streaming
+            // 'R' or anything else: keep announcing
+        }
+    }
+    while (Serial.available()) Serial.read();   // consume leftover bytes
+}
 
 // ── Setup ──────────────────────────────────────────────────
 void setup() {
@@ -78,14 +104,20 @@ void setup() {
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(rx_chan, &std_cfg));
     ESP_ERROR_CHECK(i2s_channel_enable(rx_chan));
 
-    // Handshake — Python waits for this before reading binary
-    Serial.println("AUDIO_STREAM_READY");
+    waitForGo();   // wait for Python to connect and send 'G'
 }
 
 // ── Main loop ──────────────────────────────────────────────
 void loop() {
-    size_t bytesRead = 0;
+    // ── Reconnect support ──────────────────────────────────
+    if (Serial.available()) {
+        while (Serial.available()) Serial.read();   // drain RX
+        waitForGo();
+        return;
+    }
 
+    // ── Stream one packet ──────────────────────────────────
+    size_t bytesRead = 0;
     esp_err_t err = i2s_channel_read(rx_chan, i2sBuf,
                                      BUFFER_SAMPLES * sizeof(int32_t),
                                      &bytesRead, portMAX_DELAY);
@@ -93,9 +125,6 @@ void loop() {
 
     int samples = (int)(bytesRead / sizeof(int32_t));
 
-    // Convert 32-bit I2S → 16-bit for serial transmission.
-    // INMP441: 24-bit audio left-aligned in 32-bit slot.
-    // >> 16 preserves the sign bit and yields int16 range.
     for (int i = 0; i < samples; i++) {
         outBuf[i] = (int16_t)((int32_t)i2sBuf[i] >> 16);
     }
