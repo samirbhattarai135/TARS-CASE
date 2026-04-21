@@ -7,9 +7,9 @@
 #define SCL_PIN 22
 #define MPU_INT_PIN 2
 
-#define PWMA 25
-#define AIN1 26
-#define AIN2 27
+#define PWMA 16
+#define AIN1 17
+#define AIN2 19
 #define PWMB 14
 #define BIN1 12
 #define BIN2 13

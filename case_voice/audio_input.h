@@ -3,11 +3,13 @@
 
 #include <Arduino.h>
 
-// Analog microphone configuration
-#define ANALOG_MIC_PIN 34        // ADC1_CH6 (GPIO 34) - analog input pin
-#define MIC_SAMPLE_RATE 16000    // 16kHz sampling for voice
-#define MIC_ADC_RESOLUTION 12    // 12-bit ADC (0-4095)
-#define MIC_BUFFER_SIZE 512
+// INMP441 I2S microphone pin configuration
+#define I2S_MIC_SCK   GPIO_NUM_32   // Bit clock
+#define I2S_MIC_WS    GPIO_NUM_15   // Word select
+#define I2S_MIC_SD    GPIO_NUM_4    // Data from mic
+
+#define MIC_SAMPLE_RATE   16000     // 16 kHz sampling for voice
+#define MIC_BUFFER_SIZE   512       // Samples per read
 
 class AudioInput {
 public:
@@ -15,16 +17,9 @@ public:
     bool begin();
     size_t read(int16_t* buffer, size_t numSamples);
     bool isAvailable();
-    uint16_t readRaw();  // Read single raw ADC value
 
 private:
     bool initialized;
-    hw_timer_t* timer;
-
-    // DC offset removal (for analog microphones)
-    int32_t dcOffset;
-    void calibrateDCoffset();
-    Serial.println("DC offset calculated successfully");
 };
 
 #endif

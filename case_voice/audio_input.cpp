@@ -1,83 +1,86 @@
 #include "audio_input.h"
+#include "driver/i2s_std.h"
 
-// Pin definition for analog microphone module
-// Connect AO (Analog Out) pin to GPIO 34
-// GPIO 34 is ADC1_CH6 and supports analog input
+// I2S channel handle — uses I2S_NUM_1 to keep I2S0 free for audio output
+static i2s_chan_handle_t rx_chan = NULL;
+
+// Temporary buffer for 32-bit I2S reads (INMP441 outputs 32-bit frames)
+static int32_t i2sBuf[MIC_BUFFER_SIZE];
 
 AudioInput::AudioInput() {
     initialized = false;
-    dcOffset = 2048;  // Midpoint of 12-bit ADC (0-4095)
-    timer = NULL;
 }
 
 bool AudioInput::begin() {
-    // Configure ADC for analog microphone
-    pinMode(ANALOG_MIC_PIN, INPUT);
+    // Create I2S RX channel on I2S_NUM_1.
+    // I2S0 is reserved for audio output (MAX98357A / PCM5102A / DAC).
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
+    esp_err_t err = i2s_new_channel(&chan_cfg, NULL, &rx_chan);
+    if (err != ESP_OK) {
+        Serial.printf("ERROR: i2s_new_channel failed: %s\n", esp_err_to_name(err));
+        return false;
+    }
 
-    // Set ADC resolution to 12 bits (0-4095)
-    analogReadResolution(MIC_ADC_RESOLUTION);
+    // Standard Philips I2S config matching INMP441 requirements:
+    // 32-bit slot width, mono (L/R pin tied to GND = left channel)
+    i2s_std_config_t std_cfg = {
+        .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(MIC_SAMPLE_RATE),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
+                        I2S_DATA_BIT_WIDTH_32BIT,
+                        I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+            .mclk = I2S_GPIO_UNUSED,
+            .bclk = I2S_MIC_SCK,
+            .ws   = I2S_MIC_WS,
+            .dout = I2S_GPIO_UNUSED,
+            .din  = I2S_MIC_SD,
+            .invert_flags = {
+                .mclk_inv = false,
+                .bclk_inv = false,
+                .ws_inv   = false,
+            },
+        },
+    };
 
-    // Set ADC attenuation for full range (0-3.3V)
-    // ADC_11db gives 0-3.3V range
-    analogSetAttenuation(ADC_11db);
+    err = i2s_channel_init_std_mode(rx_chan, &std_cfg);
+    if (err != ESP_OK) {
+        Serial.printf("ERROR: i2s_channel_init_std_mode failed: %s\n", esp_err_to_name(err));
+        return false;
+    }
 
-    // Calibrate DC offset (microphone bias voltage)
-    Serial.println("Calibrating analog microphone DC offset...");
-    calibrateDCOffset();
-    Serial.printf("DC offset: %d (ADC units)\n", dcOffset);
+    err = i2s_channel_enable(rx_chan);
+    if (err != ESP_OK) {
+        Serial.printf("ERROR: i2s_channel_enable failed: %s\n", esp_err_to_name(err));
+        return false;
+    }
 
-    Serial.println("Audio input initialized (Analog microphone)");
-    Serial.printf("Microphone pin: GPIO %d\n", ANALOG_MIC_PIN);
-    Serial.println("Note: Analog mic has lower quality than I2S.");
-    Serial.println("Consider upgrading to INMP441 for better audio.");
-
+    Serial.println("OK: Microphone (INMP441 — I2S1, GPIO 32/15/4)");
     initialized = true;
     return true;
 }
 
-void AudioInput::calibrateDCOffset() {
-    // Read multiple samples to determine DC bias
-    const int numSamples = 1000;
-    int32_t sum = 0;
-
-    for (int i = 0; i < numSamples; i++) {
-        sum += analogRead(ANALOG_MIC_PIN);
-        delayMicroseconds(100);  // Small delay between readings
-    }
-
-    dcOffset = sum / numSamples;
-}
-
-uint16_t AudioInput::readRaw() {
-    if (!initialized) return 0;
-    return analogRead(ANALOG_MIC_PIN);
-}
-
 size_t AudioInput::read(int16_t* buffer, size_t numSamples) {
-    if (!initialized) return 0;
+    if (!initialized || numSamples == 0) return 0;
 
-    // Calculate delay between samples for desired sample rate
-    // For 16kHz: 1000000 microseconds / 16000 samples = 62.5 us per sample
-    const uint32_t samplePeriodUs = 1000000 / MIC_SAMPLE_RATE;
+    // Clamp to internal buffer size
+    if (numSamples > MIC_BUFFER_SIZE) numSamples = MIC_BUFFER_SIZE;
 
-    for (size_t i = 0; i < numSamples; i++) {
-        // Read ADC value (0-4095 for 12-bit)
-        uint16_t adcValue = analogRead(ANALOG_MIC_PIN);
+    size_t bytesRead = 0;
+    esp_err_t err = i2s_channel_read(rx_chan, i2sBuf,
+                                     numSamples * sizeof(int32_t),
+                                     &bytesRead, portMAX_DELAY);
+    if (err != ESP_OK) return 0;
 
-        // Remove DC offset and convert to signed 16-bit
-        // ADC range: 0-4095 (12-bit)
-        // Convert to: -32768 to +32767 (16-bit signed)
-        int32_t centered = (int32_t)adcValue - dcOffset;
+    size_t samples = bytesRead / sizeof(int32_t);
 
-        // Scale from 12-bit to 16-bit range
-        // Multiply by 16 to use full 16-bit range (2^16 / 2^12 = 16)
-        buffer[i] = (int16_t)(centered * 16);
-
-        // Wait for next sample period
-        delayMicroseconds(samplePeriodUs);
+    // Convert 32-bit I2S → 16-bit signed.
+    // INMP441: 24-bit audio left-aligned in 32-bit slot.
+    // >> 16 preserves the sign bit and yields int16 range.
+    for (size_t i = 0; i < samples; i++) {
+        buffer[i] = (int16_t)((int32_t)i2sBuf[i] >> 16);
     }
 
-    return numSamples;
+    return samples;
 }
 
 bool AudioInput::isAvailable() {

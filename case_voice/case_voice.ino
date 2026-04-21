@@ -7,11 +7,15 @@
  * - Core 0 (Normal Priority): Audio processing + AI interaction
  *
  * Hardware:
- * - ESP32-S3 or ESP32-WROVER with PSRAM
- * - MPU6050 IMU (I2C)
+ * - ESP32-WROOM-32
+ * - MPU6050 IMU (I2C: GPIO 21/22)
  * - TB6612FNG Motor Driver
- * - INMP441 I2S Microphone
- * - MAX98357A I2S Amplifier + Speaker
+ * - INMP441 I2S Microphone (I2S1 RX: GPIO 32/15/4)
+ * - MAX98357A I2S Amplifier (I2S0 TX: GPIO 26/25/27)
+ *
+ * Audio pipeline:
+ *   INMP441 → I2S1 → ESP32 → WiFi → Personaplex AI (Colab)
+ *   Personaplex AI → WiFi → ESP32 → I2S0 → MAX98357A → Speaker
  */
 
 #include "balance_control.h"
@@ -24,22 +28,31 @@
 // WiFi credentials (UPDATE THESE!)
 const char* WIFI_SSID = "we";
 const char* WIFI_PASSWORD = "wewewewe!1";
-const char* COLAB_SERVER_URL = "https://goal-pot-groundwater-providers.trycloudflare.com/";
+// Cloudflare tunnel URL — points to personaplex_server.py proxy (port 9000),
+// NOT directly to Moshi (port 8998). Update each time you restart the tunnel.
+const char* COLAB_SERVER_URL = "https://tions-vessel-mine-coding.trycloudflare.com";
 
 // FreeRTOS queue for motor commands
 QueueHandle_t motorCommandQueue;
 
 // Global objects
-BalanceControl balanceControl;i
+BalanceControl balanceControl;
 AudioInput audioInput;
 AudioOutput audioOutput;
 WakeWordDetector wakeWordDetector;
 CommandClassifier commandClassifier;
 ColabClient colabClient;
 
-// Audio buffer
-#define AUDIO_BUFFER_SIZE 512
-int16_t audioBuffer[AUDIO_BUFFER_SIZE];
+// Audio buffers
+// Small buffer for real-time mic reads (32ms chunks)
+#define CHUNK_SAMPLES   512
+static int16_t chunkBuf[CHUNK_SAMPLES];
+
+// Voice command buffer — ONE buffer shared for recording and response (saves RAM).
+// 1.5s at 16 kHz = 24000 samples = 48 KB — fits in ESP32-WROOM-32's ~167 KB free heap.
+#define RECORD_SECONDS  1
+#define RECORD_SAMPLES  24000
+static int16_t* audioBuf = NULL;
 
 // State machine
 enum SystemState {
@@ -50,7 +63,7 @@ enum SystemState {
     STATE_SPEAKING
 };
 
-SystemState currentState = STATE_IDLE;
+volatile SystemState currentState = STATE_IDLE;
 
 void setup() {
     Serial.begin(115200);
@@ -58,6 +71,17 @@ void setup() {
 
     Serial.println("\n=== CASE Voice-Controlled Robot ===");
     Serial.println("Initializing systems...\n");
+
+    // Allocate single shared audio buffer from heap
+    audioBuf = (int16_t*)malloc(RECORD_SAMPLES * sizeof(int16_t));
+    if (!audioBuf) {
+        Serial.println("ERROR: Failed to allocate audio buffer!");
+        Serial.printf("  Requested: %d bytes\n", RECORD_SAMPLES * 2);
+        Serial.printf("  Free heap: %d bytes\n", ESP.getFreeHeap());
+        while (1) delay(1000);
+    }
+    Serial.printf("Audio buffer allocated (%d KB, free heap: %d KB)\n",
+                  (RECORD_SAMPLES * 2) / 1024, ESP.getFreeHeap() / 1024);
 
     // Create motor command queue
     motorCommandQueue = xQueueCreate(10, sizeof(MotorMode));
@@ -93,9 +117,9 @@ void setup() {
     Serial.println("\nInitializing network...");
     if (colabClient.begin(WIFI_SSID, WIFI_PASSWORD)) {
         if (colabClient.connect(COLAB_SERVER_URL)) {
-            Serial.println("Connected to Colab Personaplex server!");
+            Serial.println("Connected to Personaplex server!");
         } else {
-            Serial.println("WARNING: Could not connect to Colab server");
+            Serial.println("WARNING: Could not connect to Personaplex server");
             Serial.println("Robot will work in local-only mode");
         }
     }
@@ -130,7 +154,7 @@ void setup() {
 }
 
 void loop() {
-    // Empty - FreeRTOS tasks handle everything
+    // Empty — FreeRTOS tasks handle everything
     vTaskDelay(1000 / portTICK_PERIOD_MS);
 }
 
@@ -149,14 +173,8 @@ void balanceTask(void* parameter) {
             Serial.print("[Core 1] Received motor command: ");
             Serial.println(voiceCommand);
             balanceControl.setMotorMode(voiceCommand);
-
-            // Auto-return to balance mode after 3 seconds for movement commands
-            if (voiceCommand != BALANCE_ONLY && voiceCommand != STOPPED) {
-                // TODO: Add timeout mechanism
-            }
         }
 
-        // Small delay to maintain ~100Hz loop
         vTaskDelay(10 / portTICK_PERIOD_MS);
     }
 }
@@ -167,91 +185,91 @@ void audioTask(void* parameter) {
 
     while (1) {
         switch (currentState) {
-            case STATE_IDLE:
-                // Listen for wake word
+            case STATE_IDLE: {
+                // Listen for wake word using small chunks
                 if (audioInput.isAvailable()) {
-                    size_t samplesRead = audioInput.read(audioBuffer, AUDIO_BUFFER_SIZE);
-
-                    if (samplesRead > 0) {
-                        if (wakeWordDetector.detect(audioBuffer, samplesRead)) {
-                            Serial.println("\n[Audio] Wake word detected!");
-                            audioOutput.playTone(2000, 100);  // Confirmation beep
-                            currentState = STATE_LISTENING;
-                        }
+                    size_t samplesRead = audioInput.read(chunkBuf, CHUNK_SAMPLES);
+                    if (samplesRead > 0 && wakeWordDetector.detect(chunkBuf, samplesRead)) {
+                        Serial.println("\n[Audio] Wake word detected!");
+                        audioOutput.playTone(2000, 100);  // Confirmation beep
+                        currentState = STATE_LISTENING;
                     }
                 }
                 break;
+            }
 
-            case STATE_LISTENING:
-                // Record audio for command
-                Serial.println("[Audio] Listening for command...");
+            case STATE_LISTENING: {
+                // Record full voice command (3 seconds)
+                Serial.printf("[Audio] Recording %d seconds of audio...\n", RECORD_SECONDS);
+                size_t totalRecorded = 0;
 
-                // TODO: Record 2-3 seconds of audio
-                size_t samplesRead = audioInput.read(audioBuffer, AUDIO_BUFFER_SIZE);
-
-                if (samplesRead > 0) {
-                    // Classify command
-                    VoiceCommand cmd = commandClassifier.classify(audioBuffer, samplesRead);
-
-                    Serial.print("[Audio] Classified command: ");
-                    Serial.println(commandClassifier.commandToString(cmd));
-
-                    if (cmd == CMD_COMPLEX) {
-                        currentState = STATE_PROCESSING_COLAB;
-                    } else if (cmd != CMD_NONE) {
-                        currentState = STATE_PROCESSING_LOCAL;
-
-                        // Send motor command to balance task
-                        MotorMode mode = commandClassifier.commandToMotorMode(cmd);
-                        xQueueSend(motorCommandQueue, &mode, 0);
-
-                        audioOutput.playTone(1500, 100);  // Acknowledgment
-                        currentState = STATE_IDLE;
-                    } else {
-                        currentState = STATE_IDLE;
-                    }
+                while (totalRecorded < RECORD_SAMPLES) {
+                    size_t remaining = RECORD_SAMPLES - totalRecorded;
+                    size_t toRead = min(remaining, (size_t)CHUNK_SAMPLES);
+                    size_t got = audioInput.read(audioBuf + totalRecorded, toRead);
+                    totalRecorded += got;
                 }
-                break;
 
-            case STATE_PROCESSING_COLAB:
-                Serial.println("[Audio] Processing with Colab...");
+                Serial.printf("[Audio] Recorded %d samples\n", totalRecorded);
+                audioOutput.playTone(1500, 50);  // End-of-recording beep
 
-                if (colabClient.isConnected()) {
-                    // Send audio to Colab Personaplex
-                    if (colabClient.sendAudio(audioBuffer, AUDIO_BUFFER_SIZE)) {
-                        // Wait for response
-                        size_t receivedSamples;
-                        if (colabClient.receiveAudio(audioBuffer, AUDIO_BUFFER_SIZE, &receivedSamples)) {
-                            currentState = STATE_SPEAKING;
-                        } else {
-                            Serial.println("[Audio] Failed to receive response");
-                            audioOutput.playTone(500, 300);  // Error tone
-                            currentState = STATE_IDLE;
-                        }
-                    } else {
-                        Serial.println("[Audio] Failed to send audio");
-                        audioOutput.playTone(500, 300);
-                        currentState = STATE_IDLE;
-                    }
+                // Classify the command locally first
+                VoiceCommand cmd = commandClassifier.classify(audioBuf, totalRecorded);
+                Serial.print("[Audio] Classified: ");
+                Serial.println(commandClassifier.commandToString(cmd));
+
+                if (cmd == CMD_COMPLEX) {
+                    currentState = STATE_PROCESSING_COLAB;
+                } else if (cmd != CMD_NONE) {
+                    // Simple motor command — handle locally
+                    MotorMode mode = commandClassifier.commandToMotorMode(cmd);
+                    xQueueSend(motorCommandQueue, &mode, 0);
+                    audioOutput.playTone(1500, 100);
+                    currentState = STATE_IDLE;
                 } else {
-                    Serial.println("[Audio] Colab not connected - I'm offline");
-                    // TODO: Play "I'm offline" audio message
-                    audioOutput.playTone(500, 300);
                     currentState = STATE_IDLE;
                 }
                 break;
+            }
 
-            case STATE_SPEAKING:
-                Serial.println("[Audio] Playing response...");
+            case STATE_PROCESSING_COLAB: {
+                Serial.println("[Audio] Sending to Personaplex AI...");
 
-                // Play received audio from Personaplex
-                audioOutput.write(audioBuffer, AUDIO_BUFFER_SIZE);
+                if (colabClient.isConnected()) {
+                    // Send recorded audio, receive response into the SAME buffer
+                    // (recording is no longer needed once sent)
+                    size_t responseSamples = colabClient.processAudio(
+                        audioBuf, RECORD_SAMPLES,
+                        audioBuf, RECORD_SAMPLES
+                    );
 
+                    if (responseSamples > 0) {
+                        Serial.printf("[Audio] Got %d response samples, playing...\n",
+                                      responseSamples);
+                        size_t played = 0;
+                        while (played < responseSamples) {
+                            size_t chunk = min(responseSamples - played, (size_t)CHUNK_SAMPLES);
+                            audioOutput.write(audioBuf + played, chunk);
+                            played += chunk;
+                        }
+                    } else {
+                        Serial.println("[Audio] No response from Personaplex");
+                        audioOutput.playTone(500, 300);  // Error tone
+                    }
+                } else {
+                    Serial.println("[Audio] Personaplex not connected");
+                    audioOutput.playTone(500, 300);
+                }
+
+                currentState = STATE_IDLE;
+                break;
+            }
+
+            default:
                 currentState = STATE_IDLE;
                 break;
         }
 
-        // Small delay
         vTaskDelay(10 / portTICK_PERIOD_MS);
     }
 }
