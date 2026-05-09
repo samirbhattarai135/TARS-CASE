@@ -7,12 +7,14 @@ ESP32 firmware for voice-controlled self-balancing robot with Nvidia Personaplex
 ### Dual-Core FreeRTOS Design
 
 **Core 1 (High Priority):**
+
 - Balance control loop (~100Hz)
 - MPU6050 IMU reading
 - PID computation
 - Motor control with voice command overlay
 
 **Core 0 (Normal Priority):**
+
 - Audio input buffering (I2S microphone)
 - Wake word detection
 - Voice command classification
@@ -31,49 +33,56 @@ IDLE → (wake word) → LISTENING → (classify) → PROCESSING_LOCAL → IDLE
 See `docs/wiring_diagram.md` for complete pinout.
 
 **Audio (New):**
+
 - I2S Mic: SCK=32, WS=15, SD=4
 - I2S Speaker: BCLK=18, LRC=19, DIN=23
 
 **Balance (Existing):**
+
 - MPU6050: SDA=21, SCL=22, INT=2
 - Motors: See TB6612FNG connections
 
 ## Configuration
 
 **WiFi Credentials** (lines 23-24):
+
 ```cpp
 const char* WIFI_SSID = "YourNetwork";
 const char* WIFI_PASSWORD = "YourPassword";
 ```
 
 **Colab Server URL** (line 25):
+
 ```cpp
 const char* COLAB_SERVER_URL = "wss://your-ngrok-url.ngrok.io/audio";
 ```
 
 ## Modules
 
-| File | Purpose | Status |
-|------|---------|--------|
-| `balance_control.*` | Self-balancing PID control | ✅ Complete |
-| `audio_input.*` | I2S microphone interface | ✅ Complete |
-| `audio_output.*` | I2S speaker + amplifier | ✅ Complete |
-| `wake_word.*` | Wake word detection | ⚠️ Placeholder |
-| `command_classifier.*` | Voice command classification | ⚠️ Placeholder |
-| `colab_client.*` | WebSocket client to Personaplex | ⚠️ Stub |
+| File                   | Purpose                         | Status         |
+| ---------------------- | ------------------------------- | -------------- |
+| `balance_control.*`    | Self-balancing PID control      | ✅ Complete    |
+| `audio_input.*`        | I2S microphone interface        | ✅ Complete    |
+| `audio_output.*`       | I2S speaker + amplifier         | ✅ Complete    |
+| `wake_word.*`          | Wake word detection             | ⚠️ Placeholder |
+| `command_classifier.*` | Voice command classification    | ⚠️ Placeholder |
+| `colab_client.*`       | WebSocket client to Personaplex | ⚠️ Stub        |
 
 ## Dependencies
 
 Install via Arduino Library Manager:
+
 - I2Cdev
 - MPU6050
 - PID_v1
 
 Built-in (no install needed):
+
 - ESP32-I2S
 - FreeRTOS
 
 To be added (Phase 6):
+
 - ArduinoWebSockets
 
 ## Upload Instructions
@@ -115,26 +124,31 @@ Startup beeps: 1000Hz (200ms), 1500Hz (200ms)
 ## Testing
 
 **Balance Test:**
+
 - Place robot upright
 - Should self-balance and maintain position
 
 **Audio Test:**
+
 - Speak loudly or clap
 - Should see `[Audio] Wake word detected!` in serial
 - Should hear confirmation beep (2000Hz)
 
 **WiFi Test:**
+
 - Check serial for "WiFi connected!"
 - Should show IP address
 
 ## Current Limitations
 
 **Phase 2 Status:**
+
 - Wake word detection is placeholder (triggers on any loud sound)
 - Command classification not implemented (always returns CMD_COMPLEX)
 - WebSocket client is stub (Colab integration pending)
 
 **Next Steps:**
+
 - Phase 3: Train TFLite wake word model
 - Phase 4: Implement command classifier
 - Phase 6: Add WebSocket streaming
@@ -142,16 +156,19 @@ Startup beeps: 1000Hz (200ms), 1500Hz (200ms)
 ## Troubleshooting
 
 **Robot falls:**
+
 - Check serial for "DMP ready!" (MPU6050 working)
 - Verify balance task running: `[Core 1] Balance task started`
 - Tune PID in `balance_control.cpp`
 
 **No audio:**
+
 - Check pins: Mic SD=4, Speaker DIN=23
 - Verify power: Mic 3.3V, Speaker 5V
 - Look for "Audio input/output initialized"
 
 **No WiFi:**
+
 - Check credentials spelling
 - Ensure 2.4GHz network (not 5GHz)
 - ESP32 may need more connection attempts
@@ -161,12 +178,14 @@ See `docs/troubleshooting.md` for detailed solutions.
 ## Performance
 
 **Target Specs:**
+
 - Balance loop: 100Hz (10ms period)
 - Wake word latency: <100ms
 - Local command response: <50ms
 - Colab query round-trip: <3s (network dependent)
 
 **Memory:**
+
 - Recommend ESP32-S3 with PSRAM for audio buffering
 - Basic ESP32 may work with reduced buffer sizes
 
@@ -186,3 +205,40 @@ This is a capstone project. Code is provided as reference implementation.
 ## License
 
 MIT License - See root LICENSE file
+
+┌──────┬───────────────────┬────────────────────────────┐
+│ GPIO │ Function │ Component │
+├──────┼───────────────────┼────────────────────────────┤
+│ 2 │ MPU INT │ MPU6050 │
+├──────┼───────────────────┼────────────────────────────┤
+│ 4 │ I2S SD (mic data) │ INMP441 │
+├──────┼───────────────────┼────────────────────────────┤
+│ 12 │ BIN1 │ TB6612FNG Motor B │
+├──────┼───────────────────┼────────────────────────────┤
+│ 13 │ BIN2 │ TB6612FNG Motor B │
+├──────┼───────────────────┼────────────────────────────┤
+│ 14 │ PWMB │ TB6612FNG Motor B │
+├──────┼───────────────────┼────────────────────────────┤
+│ 16 │ PWMA │ TB6612FNG Motor A (was 25) │
+├──────┼───────────────────┼────────────────────────────┤
+│ 17 │ AIN1 │ TB6612FNG Motor A (was 26) │
+├──────┼───────────────────┼────────────────────────────┤
+│ 19 │ AIN2 │ TB6612FNG Motor A (was 27) │
+├──────┼───────────────────┼────────────────────────────┤
+│ 15 │ I2S WS │ INMP441 │
+├──────┼───────────────────┼────────────────────────────┤
+│ 21 │ SDA │ MPU6050 │
+├──────┼───────────────────┼────────────────────────────┤
+│ 22 │ SCL │ MPU6050 │
+├──────┼───────────────────┼────────────────────────────┤
+│ 25 │ I2S LRCK │ MAX98357A speaker │
+├──────┼───────────────────┼────────────────────────────┤
+│ 26 │ I2S BCK │ MAX98357A speaker │
+├──────┼───────────────────┼────────────────────────────┤
+│ 27 │ I2S DIN │ MAX98357A speaker │
+├──────┼───────────────────┼────────────────────────────┤
+│ 32 │ I2S SCK │ INMP441 │
+├──────┼───────────────────┼────────────────────────────┤
+│ 33 │ STBY │ TB6612FNG │
+└──────┴───────────────────┴────────────────────────────┘
+=
