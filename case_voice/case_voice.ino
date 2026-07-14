@@ -25,12 +25,12 @@
 #include "command_classifier.h"
 #include "colab_client.h"
 
-// WiFi credentials (UPDATE THESE!)
-const char* WIFI_SSID = "we";
-const char* WIFI_PASSWORD = "wewewewe!1";
-// Cloudflare tunnel URL — points to personaplex_server.py proxy (port 9000),
+// WiFi credentials (UPDATE THESE! — 2.4 GHz network only)
+const char* WIFI_SSID = "YOUR_WIFI_SSID";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+// Cloudflare tunnel URL — points to personaplex_server.py proxy (port 9001),
 // NOT directly to Moshi (port 8998). Update each time you restart the tunnel.
-const char* COLAB_SERVER_URL = "https://tions-vessel-mine-coding.trycloudflare.com";
+const char* COLAB_SERVER_URL = "https://your-tunnel-url.trycloudflare.com";
 
 // FreeRTOS queue for motor commands
 QueueHandle_t motorCommandQueue;
@@ -48,9 +48,9 @@ ColabClient colabClient;
 #define CHUNK_SAMPLES   512
 static int16_t chunkBuf[CHUNK_SAMPLES];
 
-// Voice command buffer — ONE buffer shared for recording and response (saves RAM).
+// Voice command recording buffer (the AI reply is streamed straight to the
+// speaker, so no response buffer is needed).
 // 1.5s at 16 kHz = 24000 samples = 48 KB — fits in ESP32-WROOM-32's ~167 KB free heap.
-#define RECORD_SECONDS  1
 #define RECORD_SAMPLES  24000
 static int16_t* audioBuf = NULL;
 
@@ -59,8 +59,7 @@ enum SystemState {
     STATE_IDLE,
     STATE_LISTENING,
     STATE_PROCESSING_LOCAL,
-    STATE_PROCESSING_COLAB,
-    STATE_SPEAKING
+    STATE_PROCESSING_COLAB
 };
 
 volatile SystemState currentState = STATE_IDLE;
@@ -199,8 +198,9 @@ void audioTask(void* parameter) {
             }
 
             case STATE_LISTENING: {
-                // Record full voice command (3 seconds)
-                Serial.printf("[Audio] Recording %d seconds of audio...\n", RECORD_SECONDS);
+                // Record full voice command
+                Serial.printf("[Audio] Recording %.1f seconds of audio...\n",
+                              (float)RECORD_SAMPLES / MIC_SAMPLE_RATE);
                 size_t totalRecorded = 0;
 
                 while (totalRecorded < RECORD_SAMPLES) {
@@ -236,23 +236,13 @@ void audioTask(void* parameter) {
                 Serial.println("[Audio] Sending to Personaplex AI...");
 
                 if (colabClient.isConnected()) {
-                    // Send recorded audio, receive response into the SAME buffer
-                    // (recording is no longer needed once sent)
+                    // Send recorded audio; the reply is streamed straight to
+                    // the speaker as it downloads (no size limit)
                     size_t responseSamples = colabClient.processAudio(
-                        audioBuf, RECORD_SAMPLES,
-                        audioBuf, RECORD_SAMPLES
+                        audioBuf, RECORD_SAMPLES, &audioOutput
                     );
 
-                    if (responseSamples > 0) {
-                        Serial.printf("[Audio] Got %d response samples, playing...\n",
-                                      responseSamples);
-                        size_t played = 0;
-                        while (played < responseSamples) {
-                            size_t chunk = min(responseSamples - played, (size_t)CHUNK_SAMPLES);
-                            audioOutput.write(audioBuf + played, chunk);
-                            played += chunk;
-                        }
-                    } else {
+                    if (responseSamples == 0) {
                         Serial.println("[Audio] No response from Personaplex");
                         audioOutput.playTone(500, 300);  // Error tone
                     }

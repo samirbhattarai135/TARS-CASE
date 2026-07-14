@@ -25,7 +25,7 @@ ESP32 firmware for voice-controlled self-balancing robot with Nvidia Personaplex
 
 ```
 IDLE → (wake word) → LISTENING → (classify) → PROCESSING_LOCAL → IDLE
-                                            └→ PROCESSING_COLAB → SPEAKING → IDLE
+                                            └→ PROCESSING_COLAB (streams reply to speaker) → IDLE
 ```
 
 ## Pin Configuration
@@ -34,8 +34,8 @@ See `docs/wiring_diagram.md` for complete pinout.
 
 **Audio (New):**
 
-- I2S Mic: SCK=32, WS=15, SD=4
-- I2S Speaker: BCLK=18, LRC=19, DIN=23
+- I2S Mic (INMP441): SCK=32, WS=15, SD=4
+- I2S Speaker (MAX98357A): BCLK=26, LRCK=25, DIN=27
 
 **Balance (Existing):**
 
@@ -44,17 +44,17 @@ See `docs/wiring_diagram.md` for complete pinout.
 
 ## Configuration
 
-**WiFi Credentials** (lines 23-24):
+**WiFi Credentials** (top of `case_voice.ino`):
 
 ```cpp
 const char* WIFI_SSID = "YourNetwork";
 const char* WIFI_PASSWORD = "YourPassword";
 ```
 
-**Colab Server URL** (line 25):
+**Colab Server URL** — the Cloudflare tunnel to `colab/personaplex_server.py` (port 9001), NOT directly to Moshi. Update it each time you restart the tunnel:
 
 ```cpp
-const char* COLAB_SERVER_URL = "wss://your-ngrok-url.ngrok.io/audio";
+const char* COLAB_SERVER_URL = "https://your-tunnel-url.trycloudflare.com";
 ```
 
 ## Modules
@@ -66,7 +66,7 @@ const char* COLAB_SERVER_URL = "wss://your-ngrok-url.ngrok.io/audio";
 | `audio_output.*`       | I2S speaker + amplifier         | ✅ Complete    |
 | `wake_word.*`          | Wake word detection             | ⚠️ Placeholder |
 | `command_classifier.*` | Voice command classification    | ⚠️ Placeholder |
-| `colab_client.*`       | WebSocket client to Personaplex | ⚠️ Stub        |
+| `colab_client.*`       | HTTP client to Personaplex bridge | ✅ Complete  |
 
 ## Dependencies
 
@@ -80,10 +80,7 @@ Built-in (no install needed):
 
 - ESP32-I2S
 - FreeRTOS
-
-To be added (Phase 6):
-
-- ArduinoWebSockets
+- WiFi / HTTPClient (used for the Personaplex bridge)
 
 ## Upload Instructions
 
@@ -141,17 +138,19 @@ Startup beeps: 1000Hz (200ms), 1500Hz (200ms)
 
 ## Current Limitations
 
-**Phase 2 Status:**
+**Current Status:**
 
 - Wake word detection is placeholder (triggers on any loud sound)
-- Command classification not implemented (always returns CMD_COMPLEX)
-- WebSocket client is stub (Colab integration pending)
+- Command classification not implemented (always returns CMD_COMPLEX, so every
+  utterance goes to the Colab bridge)
+- Colab path is complete: HTTP POST to `colab/personaplex_server.py`, reply
+  streamed to the speaker
 
 **Next Steps:**
 
 - Phase 3: Train TFLite wake word model
 - Phase 4: Implement command classifier
-- Phase 6: Add WebSocket streaming
+- Later: replace the fixed 1.5 s recording window with silence-based endpointing
 
 ## Troubleshooting
 
@@ -163,7 +162,7 @@ Startup beeps: 1000Hz (200ms), 1500Hz (200ms)
 
 **No audio:**
 
-- Check pins: Mic SD=4, Speaker DIN=23
+- Check pins: Mic SD=4, Speaker DIN=27
 - Verify power: Mic 3.3V, Speaker 5V
 - Look for "Audio input/output initialized"
 

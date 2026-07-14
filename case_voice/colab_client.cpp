@@ -63,7 +63,7 @@ bool ColabClient::connect(const char* url) {
 }
 
 size_t ColabClient::processAudio(const int16_t* audioData, size_t numSamples,
-                                  int16_t* responseBuffer, size_t maxResponseSamples) {
+                                  AudioOutput* audioOut) {
     if (!connected || !initialized) return 0;
 
     // Re-check WiFi
@@ -79,7 +79,11 @@ size_t ColabClient::processAudio(const int16_t* audioData, size_t numSamples,
     http.addHeader("X-Sample-Rate", "16000");
     http.addHeader("X-Bit-Depth", "16");
     http.addHeader("X-Channels", "1");
-    http.setTimeout(10000);  // 10 s for AI processing
+    http.setConnectTimeout(5000);
+    // The bridge server pipeline (real-time paced upload to Moshi + 1 s
+    // trailing silence + up to 15 s response collection) runs to completion
+    // before the first response byte comes back.
+    http.setTimeout(30000);
 
     size_t sendBytes = numSamples * sizeof(int16_t);
     Serial.printf("[Colab] Sending %d samples (%d bytes)...\n", numSamples, sendBytes);
@@ -92,72 +96,55 @@ size_t ColabClient::processAudio(const int16_t* audioData, size_t numSamples,
         return 0;
     }
 
-    // Read response audio (raw PCM int16 mono 16 kHz)
-    int responseLen = http.getSize();
-    if (responseLen <= 0) {
-        Serial.println("[Colab] Empty response");
-        http.end();
-        return 0;
-    }
-
-    size_t responseSamples = responseLen / sizeof(int16_t);
-    if (responseSamples > maxResponseSamples) {
-        responseSamples = maxResponseSamples;
-    }
-
+    // Stream response audio (raw PCM int16 mono 16 kHz) straight to the
+    // speaker. AudioOutput::write() blocks on the I2S DMA buffer, which
+    // paces consumption to real time.
+    int contentLen = http.getSize();  // -1 when chunked/unknown length
     WiFiClient* stream = http.getStreamPtr();
-    size_t bytesRead = 0;
-    size_t totalBytes = responseSamples * sizeof(int16_t);
-    uint8_t* dst = (uint8_t*)responseBuffer;
 
-    while (bytesRead < totalBytes && stream->connected()) {
+    static int16_t pcmBuf[256];
+    uint8_t* raw = (uint8_t*)pcmBuf;
+    size_t leftover = 0;        // odd byte carried between reads
+    size_t totalBytes = 0;
+    size_t samplesPlayed = 0;
+    uint32_t lastDataMs = millis();
+
+    while (stream->connected() || stream->available() > 0) {
+        if (contentLen > 0 && totalBytes >= (size_t)contentLen) break;
+
         size_t avail = stream->available();
         if (avail == 0) {
+            if (millis() - lastDataMs > 5000) {
+                Serial.println("[Colab] Response stream stalled");
+                break;
+            }
             delay(1);
             continue;
         }
-        size_t toRead = min(avail, totalBytes - bytesRead);
-        size_t got = stream->readBytes(dst + bytesRead, toRead);
-        bytesRead += got;
+        lastDataMs = millis();
+
+        size_t toRead = min(avail, sizeof(pcmBuf) - leftover);
+        if (contentLen > 0) {
+            toRead = min(toRead, (size_t)contentLen - totalBytes);
+        }
+        size_t got = stream->readBytes(raw + leftover, toRead);
+        totalBytes += got;
+
+        size_t haveBytes = leftover + got;
+        size_t wholeSamples = haveBytes / sizeof(int16_t);
+        if (wholeSamples > 0 && audioOut) {
+            audioOut->write(pcmBuf, wholeSamples);
+            samplesPlayed += wholeSamples;
+        }
+        leftover = haveBytes % sizeof(int16_t);
+        if (leftover) raw[0] = raw[haveBytes - 1];
     }
 
     http.end();
 
-    responseSamples = bytesRead / sizeof(int16_t);
-    Serial.printf("[Colab] Received %d response samples\n", responseSamples);
-    return responseSamples;
-}
-
-// Legacy interface wrappers for case_voice.ino compatibility
-static int16_t* pendingResponse = NULL;
-static size_t pendingResponseSamples = 0;
-
-bool ColabClient::sendAudio(int16_t* audioBuffer, size_t numSamples) {
-    // Allocate response buffer if needed
-    if (!pendingResponse) {
-        pendingResponse = (int16_t*)malloc(MAX_RECORD_BYTES);
-        if (!pendingResponse) {
-            Serial.println("[Colab] Failed to allocate response buffer");
-            return false;
-        }
-    }
-
-    pendingResponseSamples = processAudio(audioBuffer, numSamples,
-                                           pendingResponse, MAX_RECORD_SAMPLES);
-    return (pendingResponseSamples > 0);
-}
-
-bool ColabClient::receiveAudio(int16_t* audioBuffer, size_t maxSamples, size_t* receivedSamples) {
-    if (pendingResponseSamples == 0 || !pendingResponse) {
-        *receivedSamples = 0;
-        return false;
-    }
-
-    size_t toCopy = min(pendingResponseSamples, maxSamples);
-    memcpy(audioBuffer, pendingResponse, toCopy * sizeof(int16_t));
-    *receivedSamples = toCopy;
-    pendingResponseSamples = 0;
-    return true;
+    Serial.printf("[Colab] Played %d response samples (%.1f s)\n",
+                  samplesPlayed, (float)samplesPlayed / SPK_SAMPLE_RATE);
+    return samplesPlayed;
 }
 
 bool ColabClient::isConnected() {
@@ -166,9 +153,5 @@ bool ColabClient::isConnected() {
 
 void ColabClient::disconnect() {
     connected = false;
-    if (pendingResponse) {
-        free(pendingResponse);
-        pendingResponse = NULL;
-    }
     Serial.println("Disconnected from Personaplex server");
 }

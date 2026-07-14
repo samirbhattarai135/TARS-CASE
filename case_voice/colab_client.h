@@ -4,11 +4,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
-
-// Maximum recording: 1.5s at 16 kHz = 24000 samples = 48 KB
-// ESP32-WROOM-32 has ~167 KB free heap after boot
-#define MAX_RECORD_SAMPLES  24000
-#define MAX_RECORD_BYTES    (MAX_RECORD_SAMPLES * sizeof(int16_t))
+#include "audio_output.h"
 
 class ColabClient {
 public:
@@ -18,16 +14,12 @@ public:
     bool isConnected();
     void disconnect();
 
-    // Record audio from mic, send to Personaplex, receive response audio.
-    // responseBuffer must be at least maxResponseSamples * 2 bytes.
-    // Returns the number of response audio samples written to responseBuffer.
-    // Returns 0 on failure.
+    // Send recorded audio to Personaplex and stream the reply straight to
+    // the speaker as it downloads — replies can be 15+ s of audio, far more
+    // than fits in RAM.
+    // Returns the number of response samples played (0 on failure).
     size_t processAudio(const int16_t* audioData, size_t numSamples,
-                        int16_t* responseBuffer, size_t maxResponseSamples);
-
-    // Legacy interface (for backward compatibility with case_voice.ino)
-    bool sendAudio(int16_t* audioBuffer, size_t numSamples);
-    bool receiveAudio(int16_t* audioBuffer, size_t maxSamples, size_t* receivedSamples);
+                        AudioOutput* audioOut);
 
 private:
     bool initialized;
