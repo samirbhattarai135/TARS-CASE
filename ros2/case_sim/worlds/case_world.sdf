@@ -1,0 +1,90 @@
+<?xml version="1.0" ?>
+<sdf version="1.9">
+  <world name="case_world">
+
+    <!-- 1 ms step. The controller runs at 100 Hz, so a coarser step would let
+         contact and the balance loop alias against each other and make results
+         depend on the step size rather than on the gains under test.
+         This value is mirrored by run_protocol.physics_step_s in
+         config/sweep_ranges.yaml, which needs it to size the impulse force.
+         If you change one, change the other. -->
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <!-- Unlocked: the headless sweep should run as fast as the machine
+           allows. The launch file slows it to real time for the GUI demo. -->
+      <real_time_factor>0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system"
+            name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system"
+            name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system"
+            name="gz::sim::systems::SceneBroadcaster"/>
+
+    <!-- Populates the IMU component that gz_ros2_control reads as the
+         orientation.* state interfaces. Without this system those interfaces
+         stay at zero, the controller sees a permanently upright robot, and it
+         never commands anything while the robot falls over. -->
+    <plugin filename="gz-sim-imu-system"
+            name="gz::sim::systems::Imu"/>
+
+    <!-- Deliberately NO gz-sim-sensors-system: it is the rendering sensor
+         pipeline, which an IMU does not need, and initialising ogre2 on a
+         headless container without EGL is a crash rather than a warning. -->
+
+    <!-- Serves /world/case_world/wrench, which run_supervisor.py uses to apply
+         the disturbance impulse. -->
+    <plugin filename="gz-sim-apply-link-wrench-system"
+            name="gz::sim::systems::ApplyLinkWrench"/>
+
+    <gravity>0 0 -9.8</gravity>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>100 100</size>
+            </plane>
+          </geometry>
+          <surface>
+            <friction>
+              <ode>
+                <!-- Ground contributes its own friction to the pair. Tyre
+                     friction is the swept parameter and lives on the wheel
+                     collisions in the URDF; this stays high so the sweep
+                     parameter is what actually governs grip. -->
+                <mu>1.0</mu>
+                <mu2>1.0</mu2>
+              </ode>
+            </friction>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>100 100</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>

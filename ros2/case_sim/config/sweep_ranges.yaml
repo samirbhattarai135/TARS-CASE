@@ -1,0 +1,134 @@
+# Single authoritative source for every physical parameter of the CASE simulation.
+#
+# Both scripts/sweep.py and launch/demo.launch.py read this file. Nothing here may
+# be duplicated as a literal in the URDF, the controller, or a launch file.
+#
+# Every value is an ESTIMATE, not a measurement. See the "Assumptions" section of
+# docs/superpowers/specs/2026-09-15-case-gazebo-sim-design.md for provenance.
+# Replacing an estimate with a measurement is a change to this file alone.
+
+plant:
+  # Chassis modelled as a single box; COM height is the dominant stability term.
+  # A LOWER centre of mass is the harder case: the robot falls faster.
+  total_mass_kg:
+    nominal: 0.85
+    range: [0.60, 1.20]
+  com_height_above_axle_m:
+    nominal: 0.070
+    range: [0.045, 0.095]
+  wheel_radius_m:
+    nominal: 0.034
+    range: [0.030, 0.040]
+  wheel_separation_m:
+    nominal: 0.105
+    range: [0.090, 0.125]
+  body_depth_m:
+    nominal: 0.055
+    range: [0.045, 0.070]
+  wheel_friction:
+    nominal: 1.0
+    range: [0.70, 1.30]
+
+  # Fixed chassis geometry. Width follows wheel_separation; height follows
+  # com_height so the box's centroid lands where the COM parameter says it does.
+  body_width_m: 0.100
+
+  # MPU6050 mounting position relative to base_link origin. Deliberately offset
+  # from the COM: the physical sensor sits where the board is mounted, and that
+  # offset feeds centripetal acceleration into its readings during fast rotation.
+  # String, in the exact form <origin xyz="..."> wants, so the URDF consumes it
+  # without parsing. base_link's origin is the axle centre, not the COM.
+  imu_offset_xyz_m: "0 0 0.030"
+
+motor:
+  # Unknown gearmotor. Constants swept across the range typical of small hobby
+  # gearmotors. A bench measurement of no-load RPM and stall PWM would narrow
+  # these substantially.
+  torque_constant_kt:
+    nominal: 0.0090
+    range: [0.0040, 0.0180]
+  back_emf_constant_kv:
+    nominal: 0.0090
+    range: [0.0040, 0.0180]
+  resistance_ohm:
+    nominal: 4.5
+    range: [2.0, 9.0]
+  supply_voltage_v:
+    nominal: 7.4
+    range: [7.0, 8.4]      # 2S LiPo, discharged to fully charged
+
+sensor:
+  # Transport delay is the most influential parameter in this block: derivative
+  # gain applied to a delayed signal is destabilising, so the delay decides how
+  # much Kd is affordable.
+  delay_samples:
+    nominal: 2
+    range: [1, 3]
+  angle_noise_sigma_deg:
+    nominal: 0.10
+    range: [0.05, 0.30]
+  rotation_artifact_enabled:
+    nominal: true
+    range: [false, true]
+  # Scales the artifact with |angular acceleration|.
+  # ponytail: crude stand-in for real accelerometer contamination during
+  # rotation. Upgrade to a modelled accel/gravity-vector error if the sweep
+  # turns out sensitive to it.
+  rotation_artifact_gain_deg_s2:
+    nominal: 0.002
+    range: [0.001, 0.005]
+
+controller:
+  # Gains as written in case_voice/balance_control.cpp. PID_v1 pre-scales Ki and
+  # Kd by the sample time internally; these are the pre-scaling values.
+  kp: 60.0
+  ki: 140.0
+  kd: 0.9
+  sample_time_ms: 10
+  output_limit: 255.0
+
+  # setpoint = 180 + lean. The firmware's 182 encodes a 2-degree forward lean
+  # compensating COM misalignment on the physical robot. A symmetric URDF has no
+  # such misalignment, so the default here is 0 and the sweep can ask whether
+  # that 2 degrees was compensating something real.
+  lean_deg:
+    nominal: 0.0
+    range: [-2.0, 2.0]
+
+  # Firmware give-up band. Outside it applyMotorControl() coasts the motors.
+  # This band is also the simulation's pass criterion -- see run_protocol.
+  gate_lower_deg: 150.0
+  gate_upper_deg: 200.0
+
+  # skipDeadzone remap floor. Set to 0 to reproduce self_balance.ino's actuator
+  # path, which has no deadzone compensation and is the only hardware-validated
+  # configuration available.
+  deadzone_pwm: 20
+
+  # Feedback polarity, +1 or -1. The sign of the loop depends on how the IMU
+  # quaternion is converted to pitch and on which way the URDF points the wheel
+  # joint axes -- two choices made independently. If they disagree, the
+  # controller drives the robot over faster than gravity would, and the failure
+  # looks like "the gains are wrong" rather than like a sign error.
+  #
+  # CALIBRATE: if the first run falls faster with the controller active than
+  # with it coasting, flip this. Real hardware has the same ambiguity, resolved
+  # by swapping motor leads.
+  motor_direction_sign: 1.0
+
+run_protocol:
+  initial_tilt_deg: 2.0
+  settling_window_s: 3.0        # excluded from hunt measurement
+  impulse_time_s: 3.0
+  # Fore-aft, in the pitch plane. A two-wheel balancer is neutrally stable
+  # sideways, so a lateral push tests nothing the controller is responsible for.
+  impulse_magnitude_ns:
+    nominal: 0.12
+    range: [0.05, 0.25]
+  duration_s: 10.0
+
+  # Must match <max_step_size> in worlds/case_world.sdf. The impulse is applied
+  # as a single-step wrench, so the force that delivers a given impulse is
+  # magnitude / physics_step_s -- which makes this value part of the
+  # experiment's definition, not just a solver setting.
+  physics_step_s: 0.001

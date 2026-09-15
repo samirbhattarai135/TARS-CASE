@@ -1,0 +1,11 @@
+<library path="case_sim_controller">
+  <class name="case_sim/BalanceController"
+         type="case_sim::BalanceController"
+         base_class_type="controller_interface::ControllerInterface">
+    <description>
+      Reproduces the CASE firmware's balance loop exactly: PID_v1 semantics,
+      the halved output, the integer deadzone remap, the coast gate, and a
+      back-EMF motor model, applied as joint effort.
+    </description>
+  </class>
+</library>
