@@ -150,6 +150,7 @@ def _setup(context, *_args, **_kwargs):
                 "result_file": result_file,
                 "gate_lower_deg": control.get("gate_lower_deg", 150.0),
                 "gate_upper_deg": control.get("gate_upper_deg", 200.0),
+                "lean_deg": control.get("lean_deg", 0.0),
                 # Demo runs at wall-clock pace so it is watchable; the sweep
                 # runs as fast as the machine allows.
                 "real_time_factor": 1.0 if gui else 0.0,
@@ -209,7 +210,7 @@ def _setup(context, *_args, **_kwargs):
         Node(
             package="controller_manager",
             executable="spawner",
-            arguments=["balance_controller"],
+            arguments=["balance_controller", "joint_state_broadcaster"],
             output="screen",
         ),
         supervisor,

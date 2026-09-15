@@ -1,0 +1,74 @@
+# Controller parameters for the CASE balance simulation.
+#
+# config/sweep_ranges.yaml is the authoritative source for every value here. These
+# are its `nominal` entries, used by the demo launch and as the starting point for a
+# sweep; each sweep run writes its own copy of this file with the sampled values
+# substituted and points the URDF's controller_params_file argument at it. Editing a
+# number here changes the demo only -- to change what the sweep explores, edit
+# sweep_ranges.yaml.
+
+controller_manager:
+  ros__parameters:
+    # 100 Hz is the firmware's 10 ms loop period. The controller runs inside the
+    # Gazebo update loop on simulation time, so this is exact rather than nominal.
+    update_rate: 100
+    use_sim_time: true
+
+    balance_controller:
+      type: case_sim/BalanceController
+
+    # Publishes wheel joint states so robot_state_publisher can update the wheel
+    # TFs. Without it the chassis moves in RViz while the wheels stay frozen.
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+balance_controller:
+  ros__parameters:
+    left_wheel_joint: left_wheel_joint
+    right_wheel_joint: right_wheel_joint
+
+    # Must match the <sensor name> in both the <ros2_control> block and the Gazebo
+    # <sensor> of case.urdf.xacro; it prefixes the state interfaces the controller
+    # claims, e.g. imu_sensor/orientation.w.
+    imu_sensor_name: imu_sensor
+
+    wheel_radius: 0.034
+
+    # PID_v1 pre-scales ki and kd by the sample time internally. These are the
+    # pre-scaling values, exactly as written in case_voice/balance_control.cpp.
+    kp: 60.0
+    ki: 140.0
+    kd: 0.9
+    sample_time_ms: 10
+    output_limit: 255.0
+
+    # setpoint = 180 + lean_deg. The firmware's 182 compensates a COM misalignment a
+    # symmetric URDF does not have, so the default is 0.
+    lean_deg: 0.0
+
+    # The firmware's give-up band, outside which applyMotorControl() coasts.
+    gate_lower_deg: 150.0
+    gate_upper_deg: 200.0
+
+    # skipDeadzone remap floor. 0 reproduces self_balance.ino's actuator path, the
+    # only hardware-validated configuration available.
+    deadzone_pwm: 20
+
+    # Feedback polarity, +1 or -1. Depends on the quaternion-to-pitch
+    # conversion and the URDF joint axis direction, chosen independently.
+    # Wrong sign drives the robot over faster than gravity and looks
+    # exactly like bad gains. Flip if the robot falls faster with the
+    # controller active than coasting.
+    motor_direction_sign: 1.0
+
+    # Sensor degradation applied to the ground-truth orientation the IMU reports.
+    delay_samples: 2
+    angle_noise_sigma_deg: 0.10
+    rotation_artifact_enabled: true
+    rotation_artifact_gain_deg_s2: 0.002
+
+    # tau = kt * (supply_voltage_v * pwm/255 - back_emf_constant_kv * omega) / resistance_ohm
+    torque_constant_kt: 0.0090
+    back_emf_constant_kv: 0.0090
+    resistance_ohm: 4.5
+    supply_voltage_v: 7.4

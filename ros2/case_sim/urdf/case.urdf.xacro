@@ -1,0 +1,232 @@
+<?xml version="1.0"?>
+<robot name="case" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- Two-wheel balancer: one chassis box, two wheels, one sensor frame. No caster
+       and no third contact point, because falling over when control fails is the
+       behaviour under test.
+
+       config/sweep_ranges.yaml is the authoritative source for every physical value
+       below. The defaults here are its `nominal` entries; a sweep run overrides them
+       on the xacro command line. Nothing physical is written as a literal. -->
+
+  <xacro:arg name="total_mass_kg"            default="0.85"/>
+  <xacro:arg name="com_height_above_axle_m" default="0.070"/>
+  <xacro:arg name="wheel_radius_m"          default="0.034"/>
+  <xacro:arg name="wheel_separation_m"      default="0.105"/>
+  <xacro:arg name="body_depth_m"            default="0.055"/>
+  <xacro:arg name="body_width_m"            default="0.100"/>
+  <xacro:arg name="wheel_friction"        default="1.0"/>
+
+  <!-- Consumed as a string in the form <origin xyz> already wants, so no parsing. -->
+  <xacro:arg name="imu_offset_xyz_m"        default="0 0 0.030"/>
+
+  <!-- The floor is the 100 Hz controller rate: a slower sensor would add latency on
+       top of the transport delay the controller models deliberately. Set to the
+       physics rate so the controller's ring buffer is the only delay in the loop. -->
+  <xacro:arg name="imu_update_rate"       default="1000"/>
+
+  <!-- A guard rail, not a model parameter. An order of magnitude above the stall
+       torque the widest motor constants can produce, so it never clips a command the
+       motor model considers reachable. -->
+  <xacro:arg name="effort_limit"          default="1.0"/>
+
+  <!-- gz_ros2_control runs the controller_manager inside Gazebo and reads controller
+       parameters from this file. The sweep passes a per-run file; the default keeps
+       a bare `xacro case.urdf.xacro` working for inspection. -->
+  <xacro:arg name="controller_params_file" default="$(find case_sim)/config/controllers.yaml"/>
+
+  <xacro:property name="total_mass"       value="$(arg total_mass_kg)"/>
+  <xacro:property name="com_height"       value="$(arg com_height_above_axle_m)"/>
+  <xacro:property name="wheel_radius"     value="$(arg wheel_radius_m)"/>
+  <xacro:property name="wheel_separation" value="$(arg wheel_separation_m)"/>
+  <xacro:property name="body_depth"       value="$(arg body_depth_m)"/>
+  <xacro:property name="body_width"       value="$(arg body_width_m)"/>
+  <xacro:property name="wheel_friction"   value="$(arg wheel_friction)"/>
+  <xacro:property name="effort_limit"     value="$(arg effort_limit)"/>
+
+  <!-- The box spans from the axle plane up to twice the COM height, so its centroid
+       lands exactly at com_height_above_axle and no part of the chassis hangs below
+       the axle where it could reach the ground. -->
+  <xacro:property name="body_height" value="${2 * com_height}"/>
+
+  <!-- Wheels and sensor board are not swept in their own right; they take fixed
+       shares of the total so that total_mass keeps meaning the whole robot. -->
+  <xacro:property name="wheel_mass" value="${0.05 * total_mass}"/>
+  <xacro:property name="imu_mass"   value="${0.01 * total_mass}"/>
+  <xacro:property name="body_mass"  value="${total_mass - 2 * wheel_mass - imu_mass}"/>
+
+  <!-- Tyre thickness is not swept: a cylinder's inertia about its spin axis is
+       m*r^2/2 whatever the width. Tied to the radius so the wheel stays in
+       proportion when the radius is. -->
+  <xacro:property name="wheel_width" value="${0.2 * wheel_radius}"/>
+
+  <!-- MPU6050 breakout footprint, used only for the board's (negligible) inertia. -->
+  <xacro:property name="imu_board_size" value="0.020"/>
+
+  <material name="case_shell"><color rgba="0.20 0.22 0.25 1.0"/></material>
+  <material name="case_tyre"><color rgba="0.05 0.05 0.05 1.0"/></material>
+
+  <!-- Inertia is computed from the geometry rather than written down, so changing a
+       mass or a dimension cannot leave a stale tensor behind. -->
+  <xacro:macro name="box_inertia" params="mass x y z">
+    <inertia ixx="${mass * (y*y + z*z) / 12.0}" ixy="0.0" ixz="0.0"
+             iyy="${mass * (x*x + z*z) / 12.0}" iyz="0.0"
+             izz="${mass * (x*x + y*y) / 12.0}"/>
+  </xacro:macro>
+
+  <!-- Solid cylinder about its own axis (local Z). Wheel links give the inertial
+       origin the same rpy as the geometry, which puts the spin axis on Y. -->
+  <xacro:macro name="cylinder_inertia" params="mass radius length">
+    <inertia ixx="${mass * (3 * radius*radius + length*length) / 12.0}" ixy="0.0" ixz="0.0"
+             iyy="${mass * (3 * radius*radius + length*length) / 12.0}" iyz="0.0"
+             izz="${mass * radius*radius / 2.0}"/>
+  </xacro:macro>
+
+  <!-- base_link's origin is the wheel axle centre, not the centre of mass: the spawn
+       height is wheel_radius and the initial tilt is a rotation about this point. -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 ${com_height}" rpy="0 0 0"/>
+      <geometry><box size="${body_depth} ${body_width} ${body_height}"/></geometry>
+      <material name="case_shell"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 ${com_height}" rpy="0 0 0"/>
+      <geometry><box size="${body_depth} ${body_width} ${body_height}"/></geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0 0 ${com_height}" rpy="0 0 0"/>
+      <mass value="${body_mass}"/>
+      <xacro:box_inertia mass="${body_mass}" x="${body_depth}" y="${body_width}" z="${body_height}"/>
+    </inertial>
+  </link>
+
+  <xacro:macro name="wheel" params="side reflect">
+    <link name="${side}_wheel">
+      <visual>
+        <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+        <material name="case_tyre"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+      </collision>
+      <inertial>
+        <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
+        <mass value="${wheel_mass}"/>
+        <xacro:cylinder_inertia mass="${wheel_mass}" radius="${wheel_radius}" length="${wheel_width}"/>
+      </inertial>
+    </link>
+
+    <joint name="${side}_wheel_joint" type="continuous">
+      <parent link="base_link"/>
+      <child link="${side}_wheel"/>
+      <origin xyz="0 ${reflect * wheel_separation / 2.0} 0" rpy="0 0 0"/>
+      <axis xyz="0 1 0"/>
+    </joint>
+
+    <gazebo reference="${side}_wheel">
+      <mu1>${wheel_friction}</mu1>
+      <mu2>${wheel_friction}</mu2>
+    </gazebo>
+  </xacro:macro>
+
+  <xacro:wheel side="left"  reflect="1"/>
+  <xacro:wheel side="right" reflect="-1"/>
+
+  <!-- Deliberately not at the centre of mass: the real board is mounted where it
+       fits, and that offset feeds centripetal acceleration into its readings. -->
+  <link name="imu_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="${imu_mass}"/>
+      <xacro:box_inertia mass="${imu_mass}" x="${imu_board_size}" y="${imu_board_size}" z="${imu_board_size}"/>
+    </inertial>
+  </link>
+
+  <joint name="imu_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="imu_link"/>
+    <origin xyz="$(arg imu_offset_xyz_m)" rpy="0 0 0"/>
+  </joint>
+
+  <!-- sdformat merges a fixed joint's child into its parent by default, which would
+       take imu_link and the sensor gz_ros2_control matches by name with it. -->
+  <gazebo reference="imu_joint">
+    <preserveFixedJoint>true</preserveFixedJoint>
+  </gazebo>
+
+  <gazebo reference="imu_link">
+    <sensor name="imu_sensor" type="imu">
+      <always_on>1</always_on>
+      <update_rate>$(arg imu_update_rate)</update_rate>
+      <topic>imu</topic>
+      <imu>
+        <!-- Without this element gz-sim reports orientation relative to the sensor's
+             pose at spawn, so a robot spawned tilted would read as upright and the
+             controller would balance about the tilted pose. ENU with zero heading
+             makes the reference the world frame. -->
+        <orientation_reference_frame>
+          <localization>ENU</localization>
+        </orientation_reference_frame>
+      </imu>
+    </sensor>
+  </gazebo>
+
+  <ros2_control name="case_gz_system" type="system">
+    <hardware>
+      <plugin>gz_ros2_control/GazeboSimSystem</plugin>
+    </hardware>
+
+    <!-- Effort, because it is the only interface that lets the motor model decide
+         the torque. Velocity or position would hide the actuator behind Gazebo's
+         own controller. -->
+    <joint name="left_wheel_joint">
+      <command_interface name="effort">
+        <param name="min">${-effort_limit}</param>
+        <param name="max">${effort_limit}</param>
+      </command_interface>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+
+    <joint name="right_wheel_joint">
+      <command_interface name="effort">
+        <param name="min">${-effort_limit}</param>
+        <param name="max">${effort_limit}</param>
+      </command_interface>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+
+    <!-- Chassis pitch is the free orientation of base_link in the world, so no joint
+         interface can supply it. gz_ros2_control pairs this with the Gazebo sensor of
+         the same name and exports the ten interfaces below; the orientation it
+         reports comes from the link's world pose, so it is ground truth and the
+         controller applies the DMP's delay and noise to it itself.
+
+         Not in the Jazzy documentation, which covers force-torque sensors only. It is
+         in the implementation: gz_system.cpp matches sim::components::Imu and
+         registers exactly these names in registerSensors(). -->
+    <sensor name="imu_sensor">
+      <state_interface name="orientation.x"/>
+      <state_interface name="orientation.y"/>
+      <state_interface name="orientation.z"/>
+      <state_interface name="orientation.w"/>
+      <state_interface name="angular_velocity.x"/>
+      <state_interface name="angular_velocity.y"/>
+      <state_interface name="angular_velocity.z"/>
+      <state_interface name="linear_acceleration.x"/>
+      <state_interface name="linear_acceleration.y"/>
+      <state_interface name="linear_acceleration.z"/>
+    </sensor>
+  </ros2_control>
+
+  <gazebo>
+    <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+      <parameters>$(arg controller_params_file)</parameters>
+    </plugin>
+  </gazebo>
+
+</robot>
