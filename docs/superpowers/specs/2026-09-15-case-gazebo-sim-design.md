@@ -135,6 +135,16 @@ Three further semantics are reproduced exactly:
   bounded to the output limits at the point of accumulation, not after summing. This
   is the library's anti-windup, and it governs recovery behaviour after a large tilt.
 - **Proportional on error** (`P_ON_E`, the library default).
+- **The rate gate is integer milliseconds, not floating-point seconds.** Upstream
+  gates on `millis() - lastTime >= SampleTime` in `unsigned long` milliseconds.
+  Transcribing that as `now_s - last_time_s >= 0.010` on doubles silently skips
+  roughly 44% of cycles: `0.03 - 0.02` evaluates to `0.009999999999999998`, a few
+  units in the last place short of the threshold. Measured: 2187 of 5000 cycles
+  skipped, and 2189 when the time source is `rclcpp::Time::seconds()`, which is
+  exactly what the controller passes. Since Ki=140 is strongly timestep-sensitive,
+  this would have invalidated every sweep result while appearing to work. The port
+  keeps the period in integer milliseconds and derives the gain scaling from it,
+  so there is still one source of truth for the period.
 
 A textbook PID implementation would make Kp=60 mean something different from what it
 means in the firmware, which would invalidate every result.
@@ -190,8 +200,9 @@ Four properties of this chain were found by reading the firmware and materially
 affect the result:
 
 1. **The output is halved** (`balance_control.cpp:170`). The PID computes to ±255
-   but the motors never receive more than ±127. The effective proportional gain at
-   the wheels is 30, not 60.
+   but no more than ±127 reaches the deadzone remap. The effective proportional
+   gain at the wheels is 30, not 60. (The remap then lifts that to at most 137 —
+   see the next point. 127 is the pre-remap figure.)
 
 2. **The deadzone remap has a ceiling.** `skipDeadzone` maps its input across
    [20, 255], but its input has already been halved, so the maximum commanded PWM is
@@ -209,11 +220,20 @@ affect the result:
    the firmware's integer operations verbatim; a floating-point port of these lines
    moves the discontinuity and would report a stability the hardware will not show.
 
-4. **`stop()` coasts; it does not brake.** On the TB6612, IN1=LOW with IN2=LOW is
-   stop/high-impedance. Short brake is IN1=HIGH with IN2=HIGH. The comment at
-   `self_balance/self_balance.ino:262` describes this as "Brake mode," which is
-   incorrect. The simulation models coast, matching the code. The misleading comment
-   should be corrected separately; it is out of scope here.
+4. **`stop()` coasts; it does not brake — but the in-gate path does brake.** On
+   the TB6612, IN1=LOW with IN2=LOW is stop/high-impedance. Short brake is
+   IN1=HIGH with IN2=HIGH. The comment at `self_balance/self_balance.ino:262`
+   describes `stop()` as "Brake mode," which is incorrect. The simulation models
+   coast there, matching the code; the misleading comment is a separate fix and
+   out of scope.
+
+   There is a second regime the original design missed. Inside the gate with
+   `|output| < 2`, the firmware still calls `forward(0)` or `reverse(0)`: the
+   direction pins are driven and PWM is 0, which on the TB6612 is a short brake,
+   not a coast. So the robot brakes while hunting near upright and coasts only
+   once it has given up. The motor model gets this right without a special case —
+   `torque_from_pwm(0, omega, p)` evaluates to `-Kt*Kv*omega/R`, the braking
+   torque — and `is_coasting()` covers only the true `stop()` path.
 
 ### Motor model
 
@@ -230,6 +250,22 @@ precisely the regime in which balance is won or lost.
 Motor constants are unknown and therefore swept across the range typical of small
 hobby gearmotors. A `ponytail:` comment marks the linear back-EMF model as a known
 simplification, with a measured torque curve as the upgrade path.
+
+### Feedback polarity
+
+`motor_direction_sign` (+1 or −1) multiplies the final commanded effort.
+
+The sign of the loop depends on two decisions made independently: how the IMU
+quaternion is converted to pitch, and which way the URDF points the wheel joint
+axes. If they disagree, the controller drives the robot over faster than gravity
+alone would — and the failure looks exactly like "these gains do not work" rather
+than like a sign error, which would misattribute a wiring mistake to the quantity
+under test.
+
+This is a calibration knob, not a workaround. Physical hardware has the same
+ambiguity, resolved on the bench by swapping motor leads. First run on the
+rosject: if the robot falls faster with the controller active than with it
+coasting, flip this.
 
 ### Firmware variant
 
@@ -337,6 +373,26 @@ robot is freewheeling and cannot recover.
 The criterion is the controller's own give-up band rather than an invented
 threshold, so a pass in simulation means what a pass means on the bench.
 
+### Startup order
+
+The world starts **paused**. `run_supervisor` waits on
+`/controller_manager/list_controllers` until `balance_controller` reports
+`active`, then unpauses physics.
+
+This is not defensive coding. The sweep runs with an unlocked real-time factor,
+and the spawner takes a second or two of wall clock to activate the controller —
+which at unlocked speed is tens of simulation seconds. With physics already
+running, every robot would be flat on the floor before its controller executed
+once, and the sweep would report a universal failure that says nothing about the
+gains. Nothing is measured until the loop is live.
+
+The wait itself runs on wall clock, necessarily: simulation time does not advance
+while the world is paused, so a simulation-time wait would never return.
+
+Gazebo does not publish `/clock` on its own. A `ros_gz_bridge parameter_bridge`
+supplies it; without that bridge every node with `use_sim_time` stays frozen at
+t=0 and the supervisor's timer never fires.
+
 ### Run protocol
 
 Spawn at 2 degrees of forward tilt. Allow 3 seconds of settling — long enough for
@@ -346,6 +402,15 @@ disturbance impulse at t = 3 s, then continue to t = 10 s.
 The disturbance is **fore-aft, in the pitch plane**, not lateral. A two-wheel
 balancer is neutrally stable sideways; a lateral push tests nothing the controller
 is responsible for.
+
+It is delivered as a **single-step wrench**: Gazebo's `/world/<w>/wrench` topic
+applies a force for exactly one physics iteration, so an impulse of J needs a
+force of `J / physics_step_s`. Holding a force over a wall-clock window instead
+would make the delivered impulse depend on how fast the simulation happened to be
+running, and the sweep would be comparing runs that got different pushes while
+recording them as identical. This is why `physics_step_s` appears in
+`sweep_ranges.yaml` as part of the experiment's definition rather than only as a
+solver setting in the world file.
 
 | Quantity | Value |
 |---|---|
@@ -404,17 +469,34 @@ committed and no longer exists.
 ```
 ros2/case_sim/
   urdf/case.urdf.xacro          parameterised; inertias from macros
+  worlds/case_world.sdf         1 ms step, Imu system, ApplyLinkWrench
   config/controllers.yaml       ros2_control, update_rate 100
   config/sweep_ranges.yaml      every range from sections 1-3
   config/case.rviz
   src/pid_v1.hpp                verbatim port
   src/motor_model.hpp           PWM -> deadzone -> back-EMF -> torque
   src/balance_controller.cpp    controller_interface plugin
-  launch/demo.launch.py         Gazebo GUI + RViz, single parameter set
-  launch/sweep.launch.py        headless, parameters from argv
+  case_sim_plugins.xml          pluginlib export
+  launch/case_sim.launch.py     one launch file; gui:=true/false
+  scripts/run_supervisor.py     owns one run's timeline and metrics
   scripts/sweep.py              LHS sampling, run driver, CSV output
   scripts/analyze.py            stabilised fraction, hunt distribution
 ```
+
+**One launch file, not two.** The design originally called for separate
+`demo.launch.py` and `sweep.launch.py`. Thin wrappers delegating to a shared
+implementation do not work: `IncludeLaunchDescription` forwards only the
+arguments it is explicitly given, so per-run sweep parameters would have fallen
+back to their nominal values silently — every run measuring the same robot while
+the CSV recorded the parameters it believed it had set. A single
+`case_sim.launch.py` with a `gui` argument avoids inventing that failure for the
+sake of two file names.
+
+**`run_supervisor.py` was missing from the original design.** Nothing owned one
+run's timeline: applying the impulse at the scheduled simulation time, ending the
+run at 10 s, and emitting the metrics. It cannot live in `sweep.py`, which is
+outside the simulation and cannot act at a precise simulation time, and it does
+not belong in the controller, which has one job. It is its own node.
 
 `config/sweep_ranges.yaml` is the single authoritative source for every physical
 range. Both the sweep script and the demo launch read it, so nominal values cannot
@@ -433,6 +515,13 @@ The controller publishes `/case/pitch`, `/case/pid_output`, and `/case/pwm` via
 update can block, which would corrupt the timing this design exists to protect.
 
 ## 6. Testing
+
+### Licensing
+
+PID_v1 is GPLv3 (Brett Beauregard, v1.1.1), not MIT. This repository is already
+GPLv3, so vendoring the library into `test/vendor/` for the equivalence test is
+compatible, and the upstream header is kept byte-identical. `package.xml`
+declares `GPL-3.0-only` to match.
 
 ### Port equivalence — the decisive check
 

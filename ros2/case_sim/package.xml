@@ -8,7 +8,7 @@
     the firmware's PID gains across the range of plausible physical parameters.
   </description>
   <maintainer email="illumibot@arroyodev.com">samirbhattarai135</maintainer>
-  <license>MIT</license>
+  <license>GPL-3.0-only</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
