@@ -375,19 +375,46 @@ threshold, so a pass in simulation means what a pass means on the bench.
 
 ### Startup order
 
-The world starts **paused**. `run_supervisor` waits on
-`/controller_manager/list_controllers` until `balance_controller` reports
-`active`, then unpauses physics.
+Nothing is measured until the control loop is live, and reaching that state takes
+three steps that cannot be reordered:
 
-This is not defensive coding. The sweep runs with an unlocked real-time factor,
-and the spawner takes a second or two of wall clock to activate the controller —
-which at unlocked speed is tens of simulation seconds. With physics already
-running, every robot would be flat on the floor before its controller executed
-once, and the sweep would report a universal failure that says nothing about the
-gains. Nothing is measured until the loop is live.
+1. The robot spawns **upright**, with physics running at real time. Upright is an
+   equilibrium, so it keeps standing through the second or two the spawner needs
+   to activate the controller.
+2. Once `/controller_manager/list_controllers` reports `balance_controller`
+   active, the supervisor tilts the robot into its real initial condition via
+   `set_pose` and releases the real-time factor to the run's setting.
+3. Only then does the band check arm. Upright readings are inside the gate, so
+   arming earlier would start the run during activation and count several
+   seconds of standing as part of the settling window.
 
-The wait itself runs on wall clock, necessarily: simulation time does not advance
-while the world is paused, so a simulation-time wait would never return.
+**The world cannot start paused**, which was this design's first answer.
+`gz_ros2_control` gates `controller_manager->update()` on
+`sim_period >= control_period`, and `sim_period` is zero while paused — so a
+paused world can never activate a controller at all, and every run would have
+failed at the activation timeout. Verified against `gz_ros2_control_plugin.cpp`
+on the `jazzy` branch.
+
+**The tilt cannot be applied at spawn** either, which was the second answer. A
+2-degree lean falls in well under a second while activation takes one or two.
+Spawning upright and tilting afterwards gives every run an identical initial
+condition regardless of how long activation took.
+
+The activation wait runs on wall clock rather than simulation time, since the
+amount of simulation time that elapses during activation is not fixed.
+
+Gazebo does not publish `/clock` on its own. A `ros_gz_bridge parameter_bridge`
+supplies it; without that bridge every node with `use_sim_time` stays frozen at
+t=0 and the supervisor's timer never fires.
+
+**Open question for the first benchmark run:** the supervisor's timeline (impulse
+at t=3 s, finish at t=10 s) rides on a simulation-time timer, which fires only
+when a `/clock` message arrives. If Gazebo throttles `/clock` below the physics
+rate, the impulse lands at the first tick at or after 3 s, which at an unlocked
+real-time factor could be measurably late and differently late per run. Check
+`ros2 topic hz /clock` during the benchmark; if it is throttled, drive the
+timeline from the pitch callback, which arrives at a deterministic 100 samples
+per simulated second.
 
 Gazebo does not publish `/clock` on its own. A `ros_gz_bridge parameter_bridge`
 supplies it; without that bridge every node with `use_sim_time` stays frozen at

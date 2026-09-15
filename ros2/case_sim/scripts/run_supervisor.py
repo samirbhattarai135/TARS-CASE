@@ -12,15 +12,23 @@ motors and the robot is gone. A pass in simulation therefore means what a pass
 means on the bench.
 
 Startup order matters and is the reason this node exists rather than a timer in
-the launch file. The world starts PAUSED. Spawning the robot and activating the
-controller takes a second or two of wall clock, and the sweep runs with an
-unlocked real-time factor -- so if physics were already running, that second
-would be tens of simulation seconds and every robot would be flat on the floor
-before its controller ever ran. Nothing is measured until the loop is live.
+the launch file. Nothing is measured until the control loop is live, and getting
+there takes three steps that cannot be reordered:
+
+1. The robot spawns UPRIGHT, with physics running at real time. Upright is an
+   equilibrium, so it keeps standing through the second or two the spawner needs.
+   The world cannot start paused: gz_ros2_control gates controller_manager
+   update() on `sim_period >= control_period`, and sim_period is 0 while paused,
+   so a paused world can never activate a controller at all.
+2. Once the controller reports active, the robot is tilted into its real initial
+   condition and the real-time factor is released to the run's setting.
+3. Only then does the band check arm. Before that, the upright readings are
+   inside the gate and would otherwise start the run early.
 """
 
 import json
 import logging
+import math
 import subprocess
 import time
 from pathlib import Path
@@ -117,6 +125,8 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
             "impulse_magnitude_ns": 0.12,
             "physics_step_s": 0.001,
             "duration_s": 10.0,
+            "initial_tilt_deg": 2.0,
+            "spawn_z_m": 0.039,
             "gate_lower_deg": 150.0,
             "gate_upper_deg": 200.0,
             # Needed here, not only by the controller: metrics are measured as
@@ -144,6 +154,12 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
         # "the gains do not work". The band check arms on the first in-band
         # reading, and the run clock starts there too.
         self._armed = False
+
+        # Upright is inside the gate, so without this the run would arm during
+        # controller activation -- before the robot has been tilted into its
+        # initial condition, and with several seconds of standing counted as
+        # part of the settling window.
+        self._arming_enabled = False
 
         # The controller publishes through a real-time publisher. Best-effort
         # here costs nothing and keeps the subscription from imposing delivery
@@ -180,20 +196,34 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
         self.get_logger().error(f"{wanted} did not become active")
         return False
 
-    def start_clock(self) -> None:
-        """Unpause physics, and pin the rate when a demo asked for real time."""
-        rtf = self._p["real_time_factor"]
-        if rtf > 0:
-            self._gz_publish(
-                f"/world/{self._p['world_name']}/set_physics",
-                "gz.msgs.Physics",
-                f"max_step_size: {self._p['physics_step_s']}, real_time_factor: {rtf}",
-            )
+    def start_run(self) -> None:
+        """Tilt the robot, release the rate limit, then allow the run to arm.
+
+        The tilt is applied here rather than at spawn because the robot has to
+        survive controller activation, and a 2-degree lean does not: it falls in
+        well under a second, while activation takes one or two. Spawning upright
+        and tilting afterwards gives the run a clean, identical initial condition
+        no matter how long activation took.
+        """
+        tilt_rad = math.radians(self._p["initial_tilt_deg"])
         self._gz_publish(
-            f"/world/{self._p['world_name']}/control",
-            "gz.msgs.WorldControl",
-            "pause: false",
+            f"/world/{self._p['world_name']}/set_pose",
+            "gz.msgs.Pose",
+            f'name: "{self._p["model_name"]}", '
+            f"position: {{x: 0, y: 0, z: {self._p['spawn_z_m']}}}, "
+            f"orientation: {{x: 0, y: {math.sin(tilt_rad / 2.0)}, z: 0, "
+            f"w: {math.cos(tilt_rad / 2.0)}}}",
         )
+
+        # 0 means unlocked, which is what the sweep wants; the demo asks for 1.
+        rtf = self._p["real_time_factor"]
+        self._gz_publish(
+            f"/world/{self._p['world_name']}/set_physics",
+            "gz.msgs.Physics",
+            f"max_step_size: {self._p['physics_step_s']}, real_time_factor: {rtf}",
+        )
+
+        self._arming_enabled = True
         self.create_timer(0.01, self._tick)
 
     # ---- run loop --------------------------------------------------------
@@ -203,6 +233,8 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
 
     def _on_pitch(self, msg: Float64) -> None:
         if not self._armed:
+            if not self._arming_enabled:
+                return
             if not in_band(msg.data, self._p["gate_lower_deg"], self._p["gate_upper_deg"]):
                 return
             self._armed = True
@@ -307,7 +339,7 @@ def main() -> None:
                             "detail": "controller never became active"}, indent=2)
             )
             return
-        node.start_clock()
+        node.start_run()
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException, SystemExit):
         pass

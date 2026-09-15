@@ -16,8 +16,7 @@ Create a **ROS 2 Jazzy** rosject, then in its web shell:
 
 ```bash
 cd ~/ros2_ws/src
-git clone <this repo>
-ln -s TARS-CASE/ros2/case_sim case_sim
+git clone <this repo>          # colcon recurses and finds ros2/case_sim
 cd ~/ros2_ws && colcon build --packages-select case_sim && source install/setup.bash
 ```
 
@@ -98,7 +97,10 @@ the URDF expands and its masses sum correctly at both ends of every range; all
 launch arguments reach their consumers; the sweep's samples are in range and its
 strata evenly covered.
 
-**Not yet verified, because it requires the rosject:** that the package compiles,
-that `gz_ros2_control` registers the IMU interfaces, that the paused-world startup
-sequence works end to end, the actual real-time factor, and the feedback sign.
-Nothing here should be trusted as a result until a benchmark run passes.
+**Not yet verified, because it requires the rosject:** that the package compiles;
+that `gz_ros2_control` registers the IMU interfaces; that the
+spawn-upright / activate / tilt / release startup sequence works end to end; the
+actual real-time factor; the feedback sign; and whether Gazebo throttles `/clock`
+below the physics rate, which would make the impulse land late and differently
+late per run (check `ros2 topic hz /clock` during the benchmark). Nothing here
+should be trusted as a result until a benchmark run passes.

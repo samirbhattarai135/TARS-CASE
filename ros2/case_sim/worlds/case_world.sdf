@@ -10,9 +10,14 @@
          If you change one, change the other. -->
     <physics name="1ms" type="ignored">
       <max_step_size>0.001</max_step_size>
-      <!-- Unlocked: the headless sweep should run as fast as the machine
-           allows. The launch file slows it to real time for the GUI demo. -->
-      <real_time_factor>0</real_time_factor>
+      <!-- Starts at real time, NOT unlocked. The controller cannot activate
+           until physics is running (gz_ros2_control gates controller_manager
+           update on sim_period >= control_period, which is 0 while paused), so
+           the robot must be upright and running during the second or two the
+           spawner takes. At real time that costs ~2 s of simulated standing;
+           unlocked it would be minutes of drift. run_supervisor unlocks it
+           immediately after tilting the robot. -->
+      <real_time_factor>1.0</real_time_factor>
     </physics>
 
     <plugin filename="gz-sim-physics-system"

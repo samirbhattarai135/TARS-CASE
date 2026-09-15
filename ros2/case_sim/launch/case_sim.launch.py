@@ -1,8 +1,8 @@
 """Launches one CASE simulation run.
 
-Both demo.launch.py and sweep.launch.py delegate here; they differ only in
-whether the GUI and RViz come up. Keeping one implementation means the run the
-presenter watches is the same run the sweep measures.
+One launch file for both uses, selected by the `gui` argument. Keeping a single
+implementation means the run the presenter watches is the same run the sweep
+measures.
 
 Every launch argument is generated from config/sweep_ranges.yaml rather than
 listed here. That file is the single authoritative source for physical
@@ -115,7 +115,7 @@ def _setup(context, *_args, **_kwargs):
     )
     controller_params.update(control)
     controller_params["noise_seed"] = seed
-    controller_params["wheel_radius"] = plant.get("wheel_radius_m", 0.034)
+    controller_params["wheel_radius"] = plant["wheel_radius_m"]
 
     tmp = tempfile.NamedTemporaryFile(
         mode="w", suffix="_case_controllers.yaml", delete=False
@@ -130,12 +130,14 @@ def _setup(context, *_args, **_kwargs):
     mappings = {k: str(v) for k, v in plant.items()}
     mappings["controller_params_file"] = tmp.name
 
-    # No -r: the world starts PAUSED and run_supervisor unpauses it once the
-    # controller is active. With an unlocked real-time factor the second or two
-    # the spawner takes would otherwise pass as tens of simulation seconds, and
-    # every robot would be on the floor before its controller ever ran.
+    # -r: physics must be RUNNING for the controller to activate at all --
+    # gz_ros2_control gates controller_manager update() on
+    # `sim_period >= control_period`, and sim_period is 0 in a paused world. The
+    # world starts at real time and the robot spawns upright, which is an
+    # equilibrium it holds through activation; run_supervisor then tilts it and
+    # releases the rate limit.
     world = Path(share) / "worlds" / "case_world.sdf"
-    gz_args = str(world) if gui else f"-s {world}"
+    gz_args = f"-r {world}" if gui else f"-r -s {world}"
 
     supervisor = Node(
         package=PACKAGE,
@@ -148,9 +150,10 @@ def _setup(context, *_args, **_kwargs):
                 "model_name": "case",
                 "controller_name": "balance_controller",
                 "result_file": result_file,
-                "gate_lower_deg": control.get("gate_lower_deg", 150.0),
-                "gate_upper_deg": control.get("gate_upper_deg", 200.0),
-                "lean_deg": control.get("lean_deg", 0.0),
+                "gate_lower_deg": control["gate_lower_deg"],
+                "gate_upper_deg": control["gate_upper_deg"],
+                "lean_deg": control["lean_deg"],
+                "spawn_z_m": plant["wheel_radius_m"] + 0.005,
                 # Demo runs at wall-clock pace so it is watchable; the sweep
                 # runs as fast as the machine allows.
                 "real_time_factor": 1.0 if gui else 0.0,
@@ -197,10 +200,10 @@ def _setup(context, *_args, **_kwargs):
             arguments=[
                 "-topic", "robot_description",
                 "-name", "case",
-                # Spawned at the protocol's initial tilt, above ground so the
-                # wheels settle onto the plane rather than starting in contact.
-                "-z", str(plant.get("wheel_radius_m", 0.034) + 0.005),
-                "-P", str(_deg_to_rad(protocol.get("initial_tilt_deg", 2.0))),
+                # Upright, just above the ground. The initial tilt is applied
+                # by run_supervisor after the controller activates -- a tilted
+                # robot would fall during activation.
+                "-z", str(plant["wheel_radius_m"] + 0.005),
             ],
             output="screen",
         ),
@@ -240,12 +243,6 @@ def _expand_xacro(path: Path, mappings: dict) -> str:
     import xacro
 
     return xacro.process_file(str(path), mappings=mappings).toxml()
-
-
-def _deg_to_rad(deg: float) -> float:
-    import math
-
-    return math.radians(float(deg))
 
 
 def generate_launch_description() -> LaunchDescription:
