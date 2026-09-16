@@ -225,7 +225,8 @@ values, including that the turns bypass the deadzone remap.
 **Not yet verified, because it requires the rosject:** that the package compiles;
 that `gz_ros2_control` registers the IMU interfaces; that the
 spawn-upright / activate / tilt / release startup sequence works end to end; the
-actual real-time factor; the feedback sign; the sign of `lean_gain_deg` and
+actual real-time factor; the feedback sign; the sign of
+`drive_gain_deg_per_m_s` and
 `steer_gain_pwm`, which are calibration knobs nothing offline can settle; and
 whether Gazebo throttles `/clock`
 below the physics rate, which would make the impulse land late and differently

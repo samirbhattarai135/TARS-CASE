@@ -224,7 +224,7 @@ drive:
 
   # PWM added to one wheel and subtracted from the other per rad/s of commanded
   # yaw, for lean_offset only. Differential, so it does not disturb the pitch
-  # loop. Signed for the same reason as lean_gain_deg.
+  # loop. Signed for the same reason as drive_gain_deg_per_m_s.
   steer_gain_pwm: 40.0
 
 run_protocol:
