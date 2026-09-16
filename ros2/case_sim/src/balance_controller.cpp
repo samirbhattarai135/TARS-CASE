@@ -145,6 +145,8 @@ private:
   // logging concern -- so failures are counted and reported, never discarded.
   bool command_effort(std::size_t index, double value);
   bool reproduce_startup_windup_{false};
+  bool holding_{true};
+  double hold_release_deg_{1.0};
   bool pid_initialised_{true};
   std::uint64_t command_write_failures_{0};
   std::uint64_t state_read_failures_{0};
@@ -190,6 +192,7 @@ controller_interface::CallbackReturn BalanceController::on_init()
     declare_from_sweep_ranges("angle_noise_sigma_deg", rclcpp::PARAMETER_DOUBLE);
     declare_from_sweep_ranges("rotation_artifact_enabled", rclcpp::PARAMETER_BOOL);
     declare_from_sweep_ranges("reproduce_startup_windup", rclcpp::PARAMETER_BOOL);
+    declare_from_sweep_ranges("hold_release_deg", rclcpp::PARAMETER_DOUBLE);
     declare_from_sweep_ranges("imu_lever_arm_m", rclcpp::PARAMETER_DOUBLE);
 
     declare_from_sweep_ranges("torque_constant_kt", rclcpp::PARAMETER_DOUBLE);
@@ -245,6 +248,7 @@ controller_interface::CallbackReturn BalanceController::on_configure(
     angle_noise_sigma_deg_ = node->get_parameter("angle_noise_sigma_deg").as_double();
     rotation_artifact_enabled_ = node->get_parameter("rotation_artifact_enabled").as_bool();
     reproduce_startup_windup_ = node->get_parameter("reproduce_startup_windup").as_bool();
+    hold_release_deg_ = node->get_parameter("hold_release_deg").as_double();
 
     motor_params_.torque_constant_kt = node->get_parameter("torque_constant_kt").as_double();
     motor_params_.back_emf_constant_kv = node->get_parameter("back_emf_constant_kv").as_double();
@@ -400,6 +404,9 @@ controller_interface::CallbackReturn BalanceController::on_activate(
   // lurch and the sweep reports 0% for every gain set, measuring the startup
   // sequence instead of the gains. `reproduce_startup_windup` turns it back on
   // to quantify what it costs, which is a question worth asking separately.
+  // reproduce_startup_windup deliberately drives from power-on, so it opts out
+  // of the hold: the wind-up transient IS the thing that experiment measures.
+  holding_ = !reproduce_startup_windup_;
   if (reproduce_startup_windup_) {
     pid_->initialize(0.0, 0.0);
     // The firmware's `input` reads 0 until the first packet, so the coast gate
@@ -492,6 +499,35 @@ controller_interface::return_type BalanceController::update(
   previous_pitch_deg_ = pitch_deg;
   if (pitch_history_depth_ < 1) {
     ++pitch_history_depth_;
+  }
+
+  // Hold zero effort until the run's initial condition actually exists.
+  //
+  // The controller must be active before physics can be paused, so between
+  // activation and the teleport the robot stands upright for a variable amount
+  // of wall time. Driving it during that window gave it momentum that set_pose
+  // does not reset -- gz.msgs.Pose carries no velocity -- so every run began
+  // with a different hidden initial state. Measured 2026-09-16: identical
+  // parameters produced a pass in one run and a failure in another, and the
+  // violent pre-tilt states aborted the physics engine on a quarter of runs.
+  //
+  // Upright with zero torque is a genuine equilibrium, so the robot simply
+  // stands there until the supervisor tilts it. Releasing on the tilt itself
+  // needs no signalling: the only thing that moves the robot is the teleport.
+  //
+  // This is harness scaffolding, not firmware behaviour. The firmware starts
+  // driving the moment it powers on; the simulation needs a defined starting
+  // state before it can measure anything, and reproducing power-on is a
+  // separate experiment (see reproduce_startup_windup).
+  if (holding_) {
+    if (std::abs(pitch_deg - kUprightDeg) <= hold_release_deg_) {
+      command_effort(left_effort_index_, 0.0);
+      command_effort(right_effort_index_, 0.0);
+      publish_without_blocking(pitch_publisher_.get(), pitch_deg);
+      publish_without_blocking(pwm_publisher_.get(), 0.0);
+      return controller_interface::return_type::OK;
+    }
+    holding_ = false;
   }
 
   // Deferred initialisation: seed the PID and the whole delay buffer from the

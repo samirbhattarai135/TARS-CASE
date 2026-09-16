@@ -157,6 +157,14 @@ controller:
   # what the defect costs -- that is its own experiment, not this one.
   reproduce_startup_windup: false
 
+  # The controller holds zero effort until pitch leaves this band, so the robot
+  # stands at its upright equilibrium while the controller activates instead of
+  # being driven through a window whose length varies run to run. Without it,
+  # identical parameters gave different outcomes and a quarter of runs aborted
+  # the physics engine. Must be below initial_tilt_deg, or the tilt never
+  # releases the hold.
+  hold_release_deg: 1.0
+
 run_protocol:
   initial_tilt_deg: 2.0
   settling_window_s: 3.0        # excluded from hunt measurement
