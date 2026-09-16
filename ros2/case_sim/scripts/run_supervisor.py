@@ -168,6 +168,7 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
         self._latest_pid_output = 0.0
         self._latest_pwm = 0.0
         self._next_progress_s = 0.0
+        self._initial_pitch_deg = float("nan")
 
         # The controller publishes through a real-time publisher. Best-effort
         # here costs nothing and keeps the subscription from imposing delivery
@@ -225,7 +226,7 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
         self._set_paused(True)
 
         tilt_rad = math.radians(self._p["initial_tilt_deg"])
-        self._gz_publish(
+        tilt_ok = self._gz_request(
             f"/world/{self._p['world_name']}/set_pose",
             "gz.msgs.Pose",
             f'name: "{self._p["model_name"]}", '
@@ -234,9 +235,17 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
             f"w: {math.cos(tilt_rad / 2.0)}}}",
         )
 
+        if not tilt_ok:
+            # Without the tilt the run starts from a different initial condition
+            # than the one recorded, so its metrics describe an experiment that
+            # was never performed.
+            self._set_paused(False)
+            self._finish(outcome="error", detail="set_pose failed; initial tilt not applied")
+            return
+
         # 0 means unlocked, which is what the sweep wants; the demo asks for 1.
         rtf = self._p["real_time_factor"]
-        self._gz_publish(
+        self._gz_request(
             f"/world/{self._p['world_name']}/set_physics",
             "gz.msgs.Physics",
             f"max_step_size: {self._p['physics_step_s']}, real_time_factor: {rtf}",
@@ -259,6 +268,9 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
                 return
             self._armed = True
             self._start_sim_s = self._sim_now_s()
+            # Recorded so a run that began from the wrong attitude is visible in
+            # the data rather than silently averaged into the sweep.
+            self._initial_pitch_deg = msg.data
 
         elapsed = self._sim_now_s() - self._start_sim_s
         self._pitch.append((elapsed, msg.data))
@@ -294,12 +306,40 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
         if elapsed >= self._p["duration_s"]:
             self._finish()
 
-    def _set_paused(self, paused: bool) -> None:
-        self._gz_publish(
+    def _set_paused(self, paused: bool) -> bool:
+        return self._gz_request(
             f"/world/{self._p['world_name']}/control",
             "gz.msgs.WorldControl",
             f"pause: {'true' if paused else 'false'}",
         )
+
+    def _gz_request(self, service: str, reqtype: str, req: str) -> bool:
+        """Call a gz SERVICE.
+
+        World control, set_pose and set_physics are services, not topics.
+        Publishing to them with `gz topic -p` is accepted and does nothing at
+        all -- which is how every run up to 2026-09-16 started from an untilted
+        robot while the CSV recorded the tilt it believed it had applied. A
+        silent no-op is the worst possible failure for a harness, so this
+        reports success and callers act on it.
+        """
+        try:
+            done = subprocess.run(
+                ["gz", "service", "-s", service,
+                 "--reqtype", reqtype, "--reptype", "gz.msgs.Boolean",
+                 "--timeout", "5000", "--req", req],
+                check=False, capture_output=True, timeout=15.0, text=True,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            logger.error("gz service %s failed: %s", service, exc)
+            return False
+        if done.returncode != 0 or "true" not in done.stdout.lower():
+            logger.error(
+                "gz service %s returned %s: %s %s",
+                service, done.returncode, done.stdout.strip(), done.stderr.strip(),
+            )
+            return False
+        return True
 
     def _apply_impulse(self) -> None:
         """Deliver the disturbance as a single-step wrench.
@@ -379,6 +419,7 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
                 gate_upper_deg=self._p["gate_upper_deg"],
             )
             result["detail"] = detail
+            result["initial_pitch_deg"] = self._initial_pitch_deg
             if outcome is not None:
                 result["outcome"] = outcome
                 result["passed"] = outcome == "pass"
