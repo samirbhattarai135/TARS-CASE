@@ -621,6 +621,28 @@ artifact model built on doubly-differentiated pitch that injected hundreds of
 degrees of noise; and post-failure tumbling that aborted the ODE collision
 solver on 40% of runs.
 
+### 2026-09-16 later: reproducibility achieved, first meaningful failures
+
+Three identical invocations now produce identical verdicts (fail at 4.020 /
+4.01 / 4.01 s) from a correctly applied initial condition (initial pitch 178.04
+/ 177.89 / 178.09, i.e. the 2 degree tilt plus sensor noise). Before this, the
+same parameters gave a pass in one run and a millisecond failure in another.
+
+The cause was a window nobody owned. The controller must be active before
+physics can be paused, so the robot was driven while standing upright for a
+variable amount of wall time, and `set_pose` resets pose but not velocity --
+`gz.msgs.Pose` has no velocity field -- so each run began with different hidden
+momentum. The fix is a hold: the controller commands zero effort until pitch
+leaves a 1 degree band, so the robot rests at its upright equilibrium until the
+teleport moves it. That is harness scaffolding and is documented as such;
+`reproduce_startup_windup` opts out, since drive-from-power-on is what that
+experiment measures.
+
+**What it revealed:** the robot now settles from its lean, holds for three
+seconds, takes the impulse at t=3 s, and falls about a second later. The failure
+mode is disturbance rejection, not an inability to stand. Every sweep result
+recorded before this point measured a startup artifact and should be discarded.
+
 ## Assumptions
 
 All physical parameters in this document are estimates, not measurements. Their
