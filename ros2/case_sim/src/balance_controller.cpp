@@ -2,6 +2,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <memory>
 #include <optional>
@@ -65,6 +66,20 @@ void publish_without_blocking(Float64Publisher * publisher, double value)
   }
 }
 
+// Jazzy returns std::optional: an interface can legitimately have no value yet,
+// most often before the simulation has produced its first sensor update.
+// Substituting 0.0 for a missing orientation would read as a robot lying flat
+// and provoke a full-scale correction against a measurement that does not exist.
+bool read_state(const hardware_interface::LoanedStateInterface & interface, double & out)
+{
+  const std::optional<double> value = interface.get_optional();
+  if (!value.has_value()) {
+    return false;
+  }
+  out = value.value();
+  return true;
+}
+
 }  // namespace
 
 class BalanceController : public controller_interface::ControllerInterface
@@ -122,6 +137,14 @@ private:
   std::size_t right_velocity_index_{0};
   std::size_t left_effort_index_{0};
   std::size_t right_effort_index_{0};
+
+  // set_value() is [[nodiscard]] because it can fail to take the lock. A
+  // dropped effort command leaves the wheels on their previous torque for a
+  // cycle, which on a balancing robot is a real disturbance rather than a
+  // logging concern -- so failures are counted and reported, never discarded.
+  bool command_effort(std::size_t index, double value);
+  std::uint64_t command_write_failures_{0};
+  std::uint64_t state_read_failures_{0};
 
   std::unique_ptr<Float64Publisher> pitch_publisher_;
   std::unique_ptr<Float64Publisher> pid_output_publisher_;
@@ -392,19 +415,51 @@ controller_interface::CallbackReturn BalanceController::on_deactivate(
   // Guarded because deactivation can follow a failed activation, in which case
   // no interface was ever loaned and the cached indices point at nothing.
   if (command_interfaces_.size() > std::max(left_effort_index_, right_effort_index_)) {
-    command_interfaces_[left_effort_index_].set_value(0.0);
-    command_interfaces_[right_effort_index_].set_value(0.0);
+    command_effort(left_effort_index_, 0.0);
+    command_effort(right_effort_index_, 0.0);
+  }
+
+  // Reported here rather than from update(), which must not log. A run with a
+  // non-zero count was disturbed by the harness, and its metrics describe that
+  // disturbance as well as the gains.
+  if (command_write_failures_ > 0 || state_read_failures_ > 0) {
+    RCLCPP_WARN(
+      get_node()->get_logger(),
+      "interface access failed during run: %lu command writes, %lu state reads",
+      static_cast<unsigned long>(command_write_failures_),
+      static_cast<unsigned long>(state_read_failures_));
   }
   return controller_interface::CallbackReturn::SUCCESS;
+}
+
+bool BalanceController::command_effort(std::size_t index, double value)
+{
+  if (command_interfaces_[index].set_value(value)) {
+    return true;
+  }
+  ++command_write_failures_;
+  return false;
 }
 
 controller_interface::return_type BalanceController::update(
   const rclcpp::Time & time, const rclcpp::Duration & period)
 {
-  const double qx = state_interfaces_[orientation_index_[0]].get_value();
-  const double qy = state_interfaces_[orientation_index_[1]].get_value();
-  const double qz = state_interfaces_[orientation_index_[2]].get_value();
-  const double qw = state_interfaces_[orientation_index_[3]].get_value();
+  double qx = 0.0;
+  double qy = 0.0;
+  double qz = 0.0;
+  double qw = 1.0;
+  if (!read_state(state_interfaces_[orientation_index_[0]], qx) ||
+      !read_state(state_interfaces_[orientation_index_[1]], qy) ||
+      !read_state(state_interfaces_[orientation_index_[2]], qz) ||
+      !read_state(state_interfaces_[orientation_index_[3]], qw))
+  {
+    // No orientation this cycle. Hold the previous command and, crucially,
+    // leave the delay buffer and pitch history untouched: advancing them with
+    // an invented sample would shift the modelled sensor latency, which is the
+    // parameter this simulation is most sensitive to.
+    ++state_read_failures_;
+    return controller_interface::return_type::OK;
+  }
 
   // The firmware's units: degrees offset by 180 so that upright reads 180.
   // Everything downstream of here -- gate, setpoint, PID -- works in them.
@@ -460,8 +515,8 @@ controller_interface::return_type BalanceController::update(
   if (is_coasting(measured_pitch_deg, gate_lower_deg_, gate_upper_deg_)) {
     // TB6612 stop is IN1=LOW, IN2=LOW -- high impedance. The wheels coast; they
     // do not brake, whatever the comment in self_balance.ino says.
-    command_interfaces_[left_effort_index_].set_value(0.0);
-    command_interfaces_[right_effort_index_].set_value(0.0);
+    command_effort(left_effort_index_, 0.0);
+    command_effort(right_effort_index_, 0.0);
   } else {
     pwm = pwm_from_pid_output(pid_->output(), deadzone_pwm_);
 
@@ -470,13 +525,22 @@ controller_interface::return_type BalanceController::update(
     // The sign mirrors the whole motor frame, wheel speed included. Flipping
     // only the torque would leave back-EMF adding to the applied voltage
     // instead of opposing it, turning the motor model into positive feedback.
-    const double left_velocity =
-      motor_direction_sign_ * state_interfaces_[left_velocity_index_].get_value();
-    const double right_velocity =
-      motor_direction_sign_ * state_interfaces_[right_velocity_index_].get_value();
-    command_interfaces_[left_effort_index_].set_value(
-      motor_direction_sign_ * torque_from_pwm(pwm, left_velocity, motor_params_));
-    command_interfaces_[right_effort_index_].set_value(
+    double left_raw = 0.0;
+    double right_raw = 0.0;
+    if (!read_state(state_interfaces_[left_velocity_index_], left_raw) ||
+        !read_state(state_interfaces_[right_velocity_index_], right_raw))
+    {
+      // Back-EMF needs wheel speed. Without it the torque would be overstated
+      // at exactly the speeds where balance is won or lost, so hold instead.
+      ++state_read_failures_;
+      return controller_interface::return_type::OK;
+    }
+    const double left_velocity = motor_direction_sign_ * left_raw;
+    const double right_velocity = motor_direction_sign_ * right_raw;
+    command_effort(
+      left_effort_index_, motor_direction_sign_ * torque_from_pwm(pwm, left_velocity, motor_params_));
+    command_effort(
+      right_effort_index_,
       motor_direction_sign_ * torque_from_pwm(pwm, right_velocity, motor_params_));
   }
 
