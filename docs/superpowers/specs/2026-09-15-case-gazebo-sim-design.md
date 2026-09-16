@@ -643,6 +643,49 @@ seconds, takes the impulse at t=3 s, and falls about a second later. The failure
 mode is disturbance rejection, not an inability to stand. Every sweep result
 recorded before this point measured a startup artifact and should be discarded.
 
+### 2026-09-16: first valid sweeps, all underpowered
+
+With reproducibility established, three paired 60-run sweeps (same seed, same
+robots, one variable each):
+
+| configuration | stabilised | paired verdict |
+|---|---|---|
+| Kp=15, deadzone 0, divisor 2 (baseline) | 2 / 52 (3.8%) | -- |
+| Kp=60, deadzone 0, divisor 2 | 0 / 43 (0.0%) | baseline rescues 2, Kp=60 rescues 0 |
+| Kp=15, deadzone 0, divisor 1 | 1 / 45 (2.2%) | baseline rescues 2, divisor 1 rescues 1 |
+
+**No difference is statistically significant.** Two versus zero discordant pairs
+is p ~ 0.5. The Kp result points against the claim at
+`case_voice/balance_control.cpp:39` rather than reproducing it, but as a hint
+only.
+
+**The divisor experiment was confounded** and should be rerun. `output_divisor`
+raises the PWM ceiling AND doubles effective gain, since pwm = |output| /
+divisor. The corrected form holds gain constant: `kp=7.5, output_divisor=1`
+gives identical PWM to `kp=15, output_divisor=2` below saturation, while
+saturating at 255 instead of 137.
+
+**Passing runs are decisively stable, not marginal**: hunt 0.153-0.160 deg rms,
+peak 0.51 deg, recovery 0.000 s. The stability boundary is sharp rather than
+gradual.
+
+**Strongest discriminator is wheel speed, not torque.** `back_emf_constant_kv`
+separates pass from fail at -2.16 standardised (passing robots have LOWER Kv,
+hence higher no-load speed: about 0.85 m/s versus 0.48 m/s), while torque
+constant is slightly HIGHER among failures. This has a mechanism -- an inverted
+pendulum is caught by driving the base under the centre of mass, which is
+speed-limited -- but the confounded divisor test has not yet confirmed it.
+
+**Power is the binding constraint on every comparison.** At a 3% base rate,
+60 runs cannot resolve differences of a few percentage points; several hundred
+per arm would be needed. The productive move is to narrow the parameter ranges
+by measuring the physical robot, not to run more sweeps over a space in which
+most sampled robots cannot balance regardless of gains.
+
+**Open harness issue:** 8 to 17 runs in 60 abort the ODE collision solver. The
+sphere-collision change did not eliminate it, and the rate rose in the later
+sweeps. A quarter of each experiment is being discarded.
+
 ## Assumptions
 
 All physical parameters in this document are estimates, not measurements. Their
