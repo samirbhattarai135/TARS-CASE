@@ -170,7 +170,14 @@ def _setup(context, *_args, **_kwargs):
         Node(
             package="ros_gz_bridge",
             executable="parameter_bridge",
-            arguments=["/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock"],
+            arguments=[
+                "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
+                # Ground-truth chassis pose as TF, so RViz has a world frame to
+                # draw the robot tilting in. Visualisation only: nothing in the
+                # control loop or the metrics reads it.
+                "/model/case/pose@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V",
+            ],
+            remappings=[("/model/case/pose", "/tf")],
             output="log",
         ),
         IncludeLaunchDescription(
