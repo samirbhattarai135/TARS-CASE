@@ -576,6 +576,51 @@ recovered and the simulation earns some confidence. If it contradicts the orderi
 either the simulation or that comment is wrong, and determining which is more
 valuable than any single figure the sweep produces.
 
+## Results log
+
+### 2026-09-16: harness brought up, first sweep, NOT yet validated
+
+The stack runs end to end on The Construct: 39 of 40 runs complete, roughly 7 s
+each for a failure, 0.58x real-time factor including startup.
+
+**First paired sweep, 19 identical robots under both gain sets:**
+
+| configuration | stabilised |
+|---|---|
+| Kp=60, deadzone_pwm=20 | 0 / 19 |
+| Kp=15, deadzone_pwm=20 | 0 / 20 |
+
+**This does not yet say anything about the gains, because the simulation fails
+its own validation test.** The robot balanced on hardware at Kp=15, and a
+simulation that returns 0% for a configuration known to work is not a valid
+instrument. Note also that both sweeps used `deadzone_pwm: 20`, from
+`case_voice`; the hardware-validated firmware is `self_balance.ino`, which has
+no deadzone compensation. The anchor configuration this design specified
+(`deadzone_pwm: 0`) had not been run.
+
+**Findings that do not depend on the sweep**, established from single-run traces:
+
+- Feedback sign confirmed as +1, by running both signs on identical seeds: at
+  +1 pitch oscillates within 1.7 degrees of upright over the first 9 ms; at -1
+  it diverges monotonically to 157 degrees.
+- Kp=60 saturates the +/-255 clamp at 4.25 degrees of error, so the loop has
+  almost no proportional region and behaves as bang-bang torque. Kp=15
+  saturates at 17 degrees.
+- The deadzone remap makes the smallest non-zero correction PWM 20, which is
+  0.54 m/s^2 of base acceleration -- a large minimum kick for a robot 2 degrees
+  off vertical.
+- The firmware's startup integrator wind-up is fatal to a free-standing robot:
+  it commands full torque into a balanced robot before the first sensor
+  reading. Hardware survives it only because someone is holding the robot.
+
+**Harness defects found and fixed along the way**, each of which produced
+plausible-looking but meaningless results: motor constants estimated for an
+ungeared motor (10x low); world commands sent to gz topics instead of services,
+so the initial tilt was never applied; measurement armed mid-fall; a rotation
+artifact model built on doubly-differentiated pitch that injected hundreds of
+degrees of noise; and post-failure tumbling that aborted the ODE collision
+solver on 40% of runs.
+
 ## Assumptions
 
 All physical parameters in this document are estimates, not measurements. Their
