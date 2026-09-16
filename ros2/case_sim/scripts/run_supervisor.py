@@ -167,6 +167,7 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
         self._trace: list[tuple[float, float, float, float]] = []
         self._latest_pid_output = 0.0
         self._latest_pwm = 0.0
+        self._next_progress_s = 0.0
 
         # The controller publishes through a real-time publisher. Best-effort
         # here costs nothing and keeps the subscription from imposing delivery
@@ -276,6 +277,16 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
             return
         elapsed = self._sim_now_s() - self._start_sim_s
 
+        # A headless run is several seconds of total silence between activation
+        # and the verdict, which reads as a hang and invites an interrupt that
+        # discards the run and its trace.
+        if elapsed >= self._next_progress_s:
+            self._next_progress_s = elapsed + 2.0
+            self.get_logger().info(
+                f"t={elapsed:5.1f}s  pitch={self._pitch[-1][1]:7.2f}  "
+                f"pwm={self._latest_pwm:6.1f}  (180 = upright)"
+            )
+
         if not self._impulse_applied and elapsed >= self._p["impulse_time_s"]:
             self._impulse_applied = True
             self._apply_impulse()
@@ -329,6 +340,22 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
             logger.error("gz command failed on %s: %s", topic, exc)
             self._finish(outcome="error", detail=f"gz topic {topic} failed: {exc}")
 
+    def write_trace(self) -> None:
+        """Flush the per-sample trace, if one was requested.
+
+        Called on normal completion and again on interrupt, so a run stopped
+        early still yields the data that explains what it was doing.
+        """
+        if not self._p["trace_file"] or not self._trace:
+            return
+        with open(self._p["trace_file"], "w") as handle:
+            handle.write("t_s,pitch_deg,pid_output,pwm\n")
+            for row in self._trace:
+                handle.write("%.4f,%.6f,%.6f,%.6f\n" % row)
+        self.get_logger().info(
+            f"trace written to {self._p['trace_file']} ({len(self._trace)} samples)"
+        )
+
     # ---- result ----------------------------------------------------------
 
     def _finish(self, outcome: str | None = None, detail: str = "") -> None:
@@ -356,12 +383,7 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
                 result["outcome"] = outcome
                 result["passed"] = outcome == "pass"
 
-        if self._p["trace_file"] and self._trace:
-            with open(self._p["trace_file"], "w") as handle:
-                handle.write("t_s,pitch_deg,pid_output,pwm\n")
-                for row in self._trace:
-                    handle.write("%.4f,%.6f,%.6f,%.6f\n" % row)
-            self.get_logger().info(f"trace written to {self._p['trace_file']}")
+        self.write_trace()
 
         Path(self._p["result_file"]).write_text(json.dumps(result, indent=2))
         self.get_logger().info(f"run finished: {result['outcome']}")
@@ -382,7 +404,7 @@ def main() -> None:
         node.start_run()
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException, SystemExit):
-        pass
+        node.write_trace()
     finally:
         node.destroy_node()
         if rclpy.ok():
