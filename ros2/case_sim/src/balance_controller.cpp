@@ -15,6 +15,7 @@
 #include "pluginlib/class_list_macros.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/state.hpp"
+#include "geometry_msgs/msg/twist.hpp"
 #include "std_msgs/msg/float64.hpp"
 
 // realtime_tools renamed its headers from .h to .hpp mid-distro. Probing keeps
@@ -23,6 +24,12 @@
 #include "realtime_tools/realtime_publisher.hpp"
 #else
 #include "realtime_tools/realtime_publisher.h"
+#endif
+
+#if __has_include("realtime_tools/realtime_buffer.hpp")
+#include "realtime_tools/realtime_buffer.hpp"
+#else
+#include "realtime_tools/realtime_buffer.h"
 #endif
 
 #include "motor_model.hpp"
@@ -39,6 +46,16 @@ constexpr double kGravity = 9.8;
 constexpr double kUprightDeg = 180.0;
 
 using Float64Publisher = realtime_tools::RealtimePublisher<std_msgs::msg::Float64>;
+
+// How a velocity command reaches the wheels. Parsed once from the
+// `drive_mode` string at configuration so that update() can never be handed
+// a mode the controller does not implement.
+enum class DriveMode
+{
+  None,        // no drive input at all; what every sweep so far measured
+  Firmware,    // applyMotorControl()'s assist and turn branches, as written
+  LeanOffset,  // setpoint shift plus a differential steer; not firmware
+};
 
 // Reproduces dmpGetGravity() followed by dmpGetYawPitchRoll() from
 // MPU6050_6Axis_MotionApps20, which is the formula the firmware's pitch comes
@@ -121,6 +138,10 @@ private:
   int noise_seed_{0};
   double motor_direction_sign_{1.0};
 
+  DriveMode drive_mode_{DriveMode::None};
+  double lean_gain_deg_{0.0};
+  double steer_gain_pwm_{0.0};
+
   MotorParams motor_params_{};
   std::optional<PidV1> pid_;
 
@@ -155,6 +176,11 @@ private:
   std::unique_ptr<Float64Publisher> pitch_publisher_;
   std::unique_ptr<Float64Publisher> pid_output_publisher_;
   std::unique_ptr<Float64Publisher> pwm_publisher_;
+
+  // Written by the subscription thread, read by update(). The buffer is the
+  // handoff: update() must not take a lock a publisher can hold.
+  realtime_tools::RealtimeBuffer<geometry_msgs::msg::Twist> velocity_command_;
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr velocity_subscription_;
 };
 
 controller_interface::CallbackReturn BalanceController::on_init()
@@ -197,6 +223,10 @@ controller_interface::CallbackReturn BalanceController::on_init()
     declare_from_sweep_ranges("output_divisor", rclcpp::PARAMETER_INTEGER);
     declare_from_sweep_ranges("imu_lever_arm_m", rclcpp::PARAMETER_DOUBLE);
 
+    declare_from_sweep_ranges("drive_mode", rclcpp::PARAMETER_STRING);
+    declare_from_sweep_ranges("lean_gain_deg", rclcpp::PARAMETER_DOUBLE);
+    declare_from_sweep_ranges("steer_gain_pwm", rclcpp::PARAMETER_DOUBLE);
+
     declare_from_sweep_ranges("torque_constant_kt", rclcpp::PARAMETER_DOUBLE);
     declare_from_sweep_ranges("back_emf_constant_kv", rclcpp::PARAMETER_DOUBLE);
     declare_from_sweep_ranges("resistance_ohm", rclcpp::PARAMETER_DOUBLE);
@@ -234,6 +264,7 @@ controller_interface::CallbackReturn BalanceController::on_configure(
   double kd = 0.0;
   double output_limit = 0.0;
   double sample_time_s = 0.0;
+  std::string drive_mode_name;
 
   try {
     kp = node->get_parameter("kp").as_double();
@@ -252,6 +283,10 @@ controller_interface::CallbackReturn BalanceController::on_configure(
     reproduce_startup_windup_ = node->get_parameter("reproduce_startup_windup").as_bool();
     hold_release_deg_ = node->get_parameter("hold_release_deg").as_double();
     output_divisor_ = static_cast<int>(node->get_parameter("output_divisor").as_int());
+
+    drive_mode_name = node->get_parameter("drive_mode").as_string();
+    lean_gain_deg_ = node->get_parameter("lean_gain_deg").as_double();
+    steer_gain_pwm_ = node->get_parameter("steer_gain_pwm").as_double();
 
     motor_params_.torque_constant_kt = node->get_parameter("torque_constant_kt").as_double();
     motor_params_.back_emf_constant_kv = node->get_parameter("back_emf_constant_kv").as_double();
@@ -289,6 +324,23 @@ controller_interface::CallbackReturn BalanceController::on_configure(
     return controller_interface::CallbackReturn::ERROR;
   }
 
+  // Parsed here and nowhere else, so an unrecognised name fails configuration
+  // instead of silently selecting a default and reporting a result for a
+  // drive nobody asked for.
+  if (drive_mode_name == "none") {
+    drive_mode_ = DriveMode::None;
+  } else if (drive_mode_name == "firmware") {
+    drive_mode_ = DriveMode::Firmware;
+  } else if (drive_mode_name == "lean_offset") {
+    drive_mode_ = DriveMode::LeanOffset;
+  } else {
+    RCLCPP_ERROR(
+      node->get_logger(),
+      "drive_mode must be none, firmware or lean_offset; got '%s'",
+      drive_mode_name.c_str());
+    return controller_interface::CallbackReturn::ERROR;
+  }
+
   pid_.emplace(kp, ki, kd, -output_limit, output_limit, sample_time_s);
 
   // One slot beyond the delay so the slot about to be overwritten is the one
@@ -305,6 +357,16 @@ controller_interface::CallbackReturn BalanceController::on_configure(
   pitch_publisher_ = std::make_unique<Float64Publisher>(pitch_topic);
   pid_output_publisher_ = std::make_unique<Float64Publisher>(pid_output_topic);
   pwm_publisher_ = std::make_unique<Float64Publisher>(pwm_topic);
+
+  // Seeded before the subscription exists so update() can never read an empty
+  // buffer. Created even for DriveMode::None: no sweep run publishes to this
+  // topic, and a subscription nobody writes to costs nothing.
+  velocity_command_.writeFromNonRT(geometry_msgs::msg::Twist());
+  velocity_subscription_ = node->create_subscription<geometry_msgs::msg::Twist>(
+    "/cmd_vel", rclcpp::SystemDefaultsQoS(),
+    [this](const geometry_msgs::msg::Twist::SharedPtr message) {
+      velocity_command_.writeFromNonRT(*message);
+    });
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -426,6 +488,10 @@ controller_interface::CallbackReturn BalanceController::on_activate(
 
   previous_pitch_deg_ = 0.0;
   pitch_history_depth_ = 0;
+
+  // A command left over from a previous activation would drive the robot the
+  // instant the run arms, from a state the run protocol never defined.
+  velocity_command_.writeFromNonRT(geometry_msgs::msg::Twist());
 
   noise_rng_.seed(static_cast<std::mt19937::result_type>(noise_seed_));
   standard_normal_.reset();
@@ -577,23 +643,56 @@ controller_interface::return_type BalanceController::update(
       omega_rad_s * omega_rad_s * imu_lever_arm_m_, kGravity);
   }
 
-  const double setpoint_deg = kUprightDeg + lean_deg_;
+  // Zero unless something is publishing /cmd_vel, and zero in DriveMode::None
+  // whatever is published, so the sweep's runs are untouched by this path.
+  const geometry_msgs::msg::Twist * command = velocity_command_.readFromRT();
+  const double forward_command = (command != nullptr) ? command->linear.x : 0.0;
+  const double turn_command = (command != nullptr) ? command->angular.z : 0.0;
+
+  // Lean into the direction of travel, and let the balance loop do the driving:
+  // holding a tilt IS moving forward on a balancer, so the wheels are never
+  // commanded forward directly and the pitch loop is never fighting a throttle
+  // it did not ask for. This is the one thing the firmware's assist modes do
+  // not do, and the reason this mode exists to be compared against them.
+  double setpoint_deg = kUprightDeg + lean_deg_;
+  if (drive_mode_ == DriveMode::LeanOffset) {
+    setpoint_deg += lean_gain_deg_ * forward_command;
+  }
 
   // Simulation time, never the wall clock: PID_v1's integral term is scaled by
   // the sample period, so timing drift would change what Ki=140 means.
   pid_->compute(measured_pitch_deg, setpoint_deg, time.seconds());
 
-  int pwm = 0;
-  if (is_coasting(measured_pitch_deg, gate_lower_deg_, gate_upper_deg_)) {
+  WheelDrive drive{0, 0, true};
+  switch (drive_mode_) {
+    case DriveMode::None:
+      drive = firmware_wheel_drive(
+        MotorMode::BalanceOnly, pid_->output(), deadzone_pwm_, output_divisor_);
+      break;
+
+    case DriveMode::Firmware:
+      drive = firmware_wheel_drive(
+        firmware_mode_from_command(forward_command, turn_command),
+        pid_->output(), deadzone_pwm_, output_divisor_);
+      break;
+
+    case DriveMode::LeanOffset:
+      drive = lean_offset_wheel_drive(
+        pwm_from_pid_output(pid_->output(), deadzone_pwm_, output_divisor_),
+        steer_gain_pwm_ * turn_command);
+      break;
+  }
+
+  double commanded_pwm = 0.0;
+  // Two separate ways to end up with no applied torque, and they mean different
+  // things: the gate is the firmware refusing to drive a robot that is already
+  // past saving, while drive.coasting is STOPPED, an explicit stop() request.
+  if (is_coasting(measured_pitch_deg, gate_lower_deg_, gate_upper_deg_) || drive.coasting) {
     // TB6612 stop is IN1=LOW, IN2=LOW -- high impedance. The wheels coast; they
     // do not brake, whatever the comment in self_balance.ino says.
     command_effort(left_effort_index_, 0.0);
     command_effort(right_effort_index_, 0.0);
   } else {
-    pwm = pwm_from_pid_output(pid_->output(), deadzone_pwm_, output_divisor_);
-
-    // Both wheels take the same command: BALANCE_ONLY is the only mode
-    // simulated, and it never steers.
     // The sign mirrors the whole motor frame, wheel speed included. Flipping
     // only the torque would leave back-EMF adding to the applied voltage
     // instead of opposing it, turning the motor model into positive feedback.
@@ -610,10 +709,16 @@ controller_interface::return_type BalanceController::update(
     const double left_velocity = motor_direction_sign_ * left_raw;
     const double right_velocity = motor_direction_sign_ * right_raw;
     command_effort(
-      left_effort_index_, motor_direction_sign_ * torque_from_pwm(pwm, left_velocity, motor_params_));
+      left_effort_index_,
+      motor_direction_sign_ * torque_from_pwm(drive.left_pwm, left_velocity, motor_params_));
     command_effort(
       right_effort_index_,
-      motor_direction_sign_ * torque_from_pwm(pwm, right_velocity, motor_params_));
+      motor_direction_sign_ * torque_from_pwm(drive.right_pwm, right_velocity, motor_params_));
+
+    // Mean of the two wheels, so this topic keeps meaning what it always meant:
+    // the steering term is differential and cancels here, and in every mode
+    // that does not steer the wheels are equal and the mean IS their value.
+    commanded_pwm = 0.5 * static_cast<double>(drive.left_pwm + drive.right_pwm);
   }
 
   // The degraded pitch, not the true one: it is what the gate acts on and what
@@ -621,7 +726,7 @@ controller_interface::return_type BalanceController::update(
   // what a pass on the bench means.
   publish_without_blocking(pitch_publisher_.get(), measured_pitch_deg);
   publish_without_blocking(pid_output_publisher_.get(), pid_->output());
-  publish_without_blocking(pwm_publisher_.get(), static_cast<double>(pwm));
+  publish_without_blocking(pwm_publisher_.get(), commanded_pwm);
 
   return controller_interface::return_type::OK;
 }

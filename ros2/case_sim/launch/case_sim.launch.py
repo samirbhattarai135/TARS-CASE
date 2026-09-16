@@ -33,7 +33,7 @@ PACKAGE = "case_sim"
 # Which block of sweep_ranges.yaml feeds which consumer. The plant shapes the
 # robot description; the rest are controller parameters read at activation.
 XACRO_BLOCKS = ("plant",)
-CONTROLLER_BLOCKS = ("motor", "sensor", "controller")
+CONTROLLER_BLOCKS = ("motor", "sensor", "controller", "drive")
 SUPERVISOR_BLOCKS = ("run_protocol",)
 
 

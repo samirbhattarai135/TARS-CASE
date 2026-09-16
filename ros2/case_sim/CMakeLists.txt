@@ -7,6 +7,7 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(controller_interface REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -20,6 +21,7 @@ target_include_directories(case_sim_controller PRIVATE
 target_compile_features(case_sim_controller PUBLIC cxx_std_17)
 ament_target_dependencies(case_sim_controller
   controller_interface
+  geometry_msgs
   hardware_interface
   pluginlib
   rclcpp

@@ -49,6 +49,82 @@ active than it would coasting, the feedback polarity is inverted: set
 the quaternion-to-pitch conversion and the URDF joint axis direction, which were
 chosen independently, and a wrong sign looks exactly like bad gains.
 
+### 2b. Drive it around
+
+Watching a robot hold still proves it does not fall over. Watching it drive
+across the floor and come back proves it balances. Two drives are simulated,
+selected by `drive_mode`:
+
+```bash
+# The firmware as written: FORWARD_ASSIST / BACKWARD_ASSIST / TURN_LEFT / TURN_RIGHT.
+ros2 launch case_sim case_sim.launch.py gui:=true \
+    drive_mode:=firmware duration_s:=60 impulse_magnitude_ns:=0.0
+
+# Drive by leaning: the setpoint shifts and the balance loop holds the tilt.
+ros2 launch case_sim case_sim.launch.py gui:=true \
+    drive_mode:=lean_offset duration_s:=60 impulse_magnitude_ns:=0.0
+```
+
+`duration_s` and the zeroed impulse are for watching only: the default 10 s run
+ends before you have driven anywhere, and the disturbance at t = 3 s would land
+in the middle of it.
+
+Then, in a second shell, with that window focused:
+
+```bash
+ros2 run teleop_twist_keyboard teleop_twist_keyboard
+```
+
+Commands latch: `teleop_twist_keyboard` sends one message per keypress, and the
+controller holds the last one it received, so the robot keeps driving until you
+press `k`. That mirrors the firmware, whose modes are latched voice commands
+rather than a held throttle.
+
+If that package is not installed, anything publishing `geometry_msgs/Twist` on
+`/cmd_vel` will do:
+
+```bash
+ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist '{linear: {x: 0.5}}'
+```
+
+**If the robot drives the wrong way, negate `lean_gain_deg`** (or
+`steer_gain_pwm` if it steers the wrong way). Both are signed calibration knobs
+for the same reason `motor_direction_sign` is: which way a positive setpoint
+shift leans depends on the pitch convention and the URDF joint axes, which were
+chosen independently.
+
+`drive_mode: "none"` is the default and is what every sweep measures. It is
+byte-identical to the controller before the drive existed, so results recorded
+earlier remain comparable.
+
+#### What the two drives are for
+
+`firmware` is a port, not a design: it adds a flat 80 PWM on top of the balance
+correction instead of leaning the setpoint, so the chassis is driven without
+being tilted into the motion and the PID ends up opposing its own throttle. Its
+turn branches also bypass the deadzone remap and cannot steer at all while the
+robot is near upright, because both wheels take the sign of the balance output
+and only their speeds differ.
+
+`lean_offset` does what a balancer is supposed to do. It is a proposal for the
+firmware, not a description of it.
+
+Which is better is measurable rather than arguable, on the same robots:
+
+```bash
+ros2 run case_sim sweep.py --runs <N> --set drive_mode=firmware    --out fw.csv
+ros2 run case_sim sweep.py --runs <N> --set drive_mode=lean_offset --out lean.csv
+ros2 run case_sim analyze.py --compare fw.csv lean.csv
+```
+
+**That comparison returns nothing today.** No sweep run publishes `/cmd_vel`, so
+every mode sees a zero command, and a zero command collapses all three onto the
+same arithmetic: `firmware` thresholds to `BALANCE_ONLY`, `lean_offset` shifts
+the setpoint by zero and splits the wheels by zero. The two CSVs will be
+identical by construction, not merely similar. Making it a real experiment needs
+`run_supervisor` to command a velocity profile during the run, which is not
+built.
+
 ### 3. Sweep
 
 ```bash
@@ -104,10 +180,18 @@ the URDF expands and its masses sum correctly at both ends of every range; all
 launch arguments reach their consumers; the sweep's samples are in range and its
 strata evenly covered.
 
+Verified for the drive layer, on the same machine: routing `BALANCE_ONLY`
+through the new per-wheel path reproduces `pwm_from_pid_output` exactly over the
+whole output range, so `drive_mode: "none"` cannot have moved any earlier
+result; and the ported assist and turn branches match hand-computed firmware
+values, including that the turns bypass the deadzone remap.
+
 **Not yet verified, because it requires the rosject:** that the package compiles;
 that `gz_ros2_control` registers the IMU interfaces; that the
 spawn-upright / activate / tilt / release startup sequence works end to end; the
-actual real-time factor; the feedback sign; and whether Gazebo throttles `/clock`
+actual real-time factor; the feedback sign; the sign of `lean_gain_deg` and
+`steer_gain_pwm`, which are calibration knobs nothing offline can settle; and
+whether Gazebo throttles `/clock`
 below the physics rate, which would make the impulse land late and differently
 late per run (check `ros2 topic hz /clock` during the benchmark). Nothing here
 should be trusted as a result until a benchmark run passes.

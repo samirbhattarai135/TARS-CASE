@@ -186,6 +186,38 @@ controller:
   # robot its motors' full speed range; 2 is the firmware as written.
   output_divisor: 2
 
+drive:
+  # Driving the robot around. Not part of the balance experiment: `none` is the
+  # default and reproduces the controller exactly as every sweep so far has
+  # measured it, so results recorded before this block stay comparable.
+  #
+  #   none        no drive input; both wheels take the balance command.
+  #   firmware    port of applyMotorControl()'s FORWARD_ASSIST / BACKWARD_ASSIST
+  #               / TURN_LEFT / TURN_RIGHT branches, arithmetic unchanged.
+  #   lean_offset drive by shifting the PID setpoint, so the balance loop tilts
+  #               the chassis into the direction of travel and drives to hold
+  #               that tilt. NOT firmware behaviour -- a proposal, measurable
+  #               against `firmware` on the same robots via --set drive_mode=.
+  drive_mode: "none"
+
+  # Degrees of setpoint shift per m/s of commanded forward velocity, for
+  # lean_offset only.
+  #
+  # SIGNED, and a calibration knob rather than a measurement: which way a
+  # positive shift leans depends on the quaternion-to-pitch convention in the
+  # controller and on the URDF joint axis directions, which were chosen
+  # independently -- the same ambiguity motor_direction_sign exists to resolve.
+  # If the robot drives away from the commanded direction, negate this.
+  #
+  # Magnitude is a trade: too small and the robot barely moves, too large and
+  # the commanded tilt eats the recoverable angle the gains have left.
+  lean_gain_deg: 1.5
+
+  # PWM added to one wheel and subtracted from the other per rad/s of commanded
+  # yaw, for lean_offset only. Differential, so it does not disturb the pitch
+  # loop. Signed for the same reason as lean_gain_deg.
+  steer_gain_pwm: 40.0
+
 run_protocol:
   initial_tilt_deg: 2.0
   settling_window_s: 3.0        # excluded from hunt measurement

@@ -61,6 +61,14 @@ balance_controller:
     # controller active than coasting.
     motor_direction_sign: 1.0
 
+    # Drive input. "none" is what the sweep measures; "firmware" ports
+    # applyMotorControl()'s assist and turn branches, "lean_offset" drives by
+    # shifting the setpoint. Gains are signed calibration knobs -- negate one if
+    # the robot drives or steers the wrong way. See sweep_ranges.yaml.
+    drive_mode: "none"
+    lean_gain_deg: 1.5
+    steer_gain_pwm: 40.0
+
     # See sweep_ranges.yaml: on, the startup lurch topples the robot in 16 ms.
     reproduce_startup_windup: false
     hold_release_deg: 1.0

@@ -142,3 +142,150 @@ TEST(MotorModel, OutputDivisorRejectsZero)
   EXPECT_EQ(case_sim::pwm_from_pid_output(100.0, 0, 0),
             case_sim::pwm_from_pid_output(100.0, 0, 1));
 }
+
+
+// ---------------------------------------------------------------------------
+// Drive modes
+// ---------------------------------------------------------------------------
+
+// The whole sweep history was recorded through pwm_from_pid_output. The drive
+// layer is only trustworthy if routing BALANCE_ONLY through it changes nothing.
+TEST(FirmwareWheelDrive, BalanceOnlyIsUnchangedAndNeverSteers)
+{
+  for (double out = -255.0; out <= 255.0; out += 0.5) {
+    const case_sim::WheelDrive drive =
+      case_sim::firmware_wheel_drive(case_sim::MotorMode::BalanceOnly, out, kFirmwareDeadzone);
+    const int expected = case_sim::pwm_from_pid_output(out, kFirmwareDeadzone);
+
+    EXPECT_EQ(drive.left_pwm, expected) << "at output " << out;
+    EXPECT_EQ(drive.right_pwm, expected) << "at output " << out;
+    EXPECT_FALSE(drive.coasting) << "at output " << out;
+  }
+}
+
+// forward(abs(basePWM) / 2 + 80), then skipDeadzone. At output 100 that is
+// 50 + 80 = 130, remapped to 20 + (130 * 235) / 255 = 139.
+TEST(FirmwareWheelDrive, ForwardAssistAddsTheFlatEightyBeforeTheRemap)
+{
+  const case_sim::WheelDrive drive =
+    case_sim::firmware_wheel_drive(case_sim::MotorMode::ForwardAssist, 100.0, kFirmwareDeadzone);
+
+  EXPECT_EQ(drive.left_pwm, 139);
+  EXPECT_EQ(drive.right_pwm, drive.left_pwm) << "forward() commands both motors alike";
+}
+
+// The `else` branch: the assist drives forward at the bare 80 even while the
+// PID is asking for the opposite correction. This is the behaviour worth
+// measuring -- the robot is thrown forward with no balance authority spent.
+TEST(FirmwareWheelDrive, ForwardAssistDrivesForwardAgainstANegativeCorrection)
+{
+  const case_sim::WheelDrive against =
+    case_sim::firmware_wheel_drive(case_sim::MotorMode::ForwardAssist, -200.0, kFirmwareDeadzone);
+
+  EXPECT_EQ(against.left_pwm, case_sim::skip_deadzone(80, kFirmwareDeadzone));
+  EXPECT_GT(against.left_pwm, 0) << "forward, though the PID asked to go back";
+}
+
+TEST(FirmwareWheelDrive, BackwardAssistMirrorsForwardAssist)
+{
+  const case_sim::WheelDrive back =
+    case_sim::firmware_wheel_drive(case_sim::MotorMode::BackwardAssist, -100.0, kFirmwareDeadzone);
+  const case_sim::WheelDrive forward =
+    case_sim::firmware_wheel_drive(case_sim::MotorMode::ForwardAssist, 100.0, kFirmwareDeadzone);
+
+  EXPECT_EQ(back.left_pwm, -forward.left_pwm);
+  EXPECT_EQ(back.right_pwm, -forward.right_pwm);
+}
+
+// The turn branches call analogWrite() directly, so they never pass through
+// skipDeadzone(). At output 100 that is abs(100)/4 = 25 and abs(100)/2 = 50
+// raw -- where BALANCE_ONLY would have remapped both onto the deadzone floor.
+TEST(FirmwareWheelDrive, TurnsBypassTheDeadzoneRemap)
+{
+  const case_sim::WheelDrive left =
+    case_sim::firmware_wheel_drive(case_sim::MotorMode::TurnLeft, 100.0, kFirmwareDeadzone);
+
+  EXPECT_EQ(left.left_pwm, 25) << "Motor A, the left wheel, is the slow one";
+  EXPECT_EQ(left.right_pwm, 50);
+  EXPECT_NE(left.left_pwm, case_sim::skip_deadzone(25, kFirmwareDeadzone));
+}
+
+TEST(FirmwareWheelDrive, TurnRightSlowsTheOtherWheel)
+{
+  const case_sim::WheelDrive right =
+    case_sim::firmware_wheel_drive(case_sim::MotorMode::TurnRight, 100.0, kFirmwareDeadzone);
+
+  EXPECT_EQ(right.left_pwm, 50);
+  EXPECT_EQ(right.right_pwm, 25);
+}
+
+// Both wheels take the sign of the PID output, so a turn cannot spin in place;
+// it yaws only while the balance loop is already driving. Near upright, where
+// a turn is most likely to be commanded, it barely turns at all.
+TEST(FirmwareWheelDrive, TurnsCannotSpinInPlaceAndStallNearUpright)
+{
+  const case_sim::WheelDrive driving =
+    case_sim::firmware_wheel_drive(case_sim::MotorMode::TurnLeft, 100.0, kFirmwareDeadzone);
+  EXPECT_GT(driving.left_pwm, 0);
+  EXPECT_GT(driving.right_pwm, 0) << "same direction; only the speeds differ";
+
+  const case_sim::WheelDrive reversing =
+    case_sim::firmware_wheel_drive(case_sim::MotorMode::TurnLeft, -100.0, kFirmwareDeadzone);
+  EXPECT_LT(reversing.left_pwm, 0);
+  EXPECT_LT(reversing.right_pwm, 0);
+
+  const case_sim::WheelDrive upright =
+    case_sim::firmware_wheel_drive(case_sim::MotorMode::TurnLeft, 3.0, kFirmwareDeadzone);
+  EXPECT_EQ(upright.left_pwm, 0) << "abs(3.0)/4 truncates to nothing";
+  EXPECT_EQ(upright.right_pwm, 1);
+}
+
+// STOPPED is stop(): both direction pins low, high impedance. It must be
+// distinguishable from a pwm that happens to be zero, which is short brake.
+TEST(FirmwareWheelDrive, StoppedCoastsRatherThanCommandingZero)
+{
+  const case_sim::WheelDrive stopped =
+    case_sim::firmware_wheel_drive(case_sim::MotorMode::Stopped, 100.0, kFirmwareDeadzone);
+
+  EXPECT_TRUE(stopped.coasting);
+  EXPECT_EQ(stopped.left_pwm, 0);
+  EXPECT_EQ(stopped.right_pwm, 0);
+}
+
+TEST(FirmwareModeFromCommand, TurnWinsOverDriveBecauseTheFirmwareCannotDoBoth)
+{
+  EXPECT_EQ(
+    case_sim::firmware_mode_from_command(1.0, 1.0), case_sim::MotorMode::TurnLeft);
+  EXPECT_EQ(
+    case_sim::firmware_mode_from_command(-1.0, -1.0), case_sim::MotorMode::TurnRight);
+}
+
+TEST(FirmwareModeFromCommand, ZeroCommandKeepsBalancingRatherThanStopping)
+{
+  EXPECT_EQ(case_sim::firmware_mode_from_command(0.0, 0.0), case_sim::MotorMode::BalanceOnly);
+  EXPECT_EQ(case_sim::firmware_mode_from_command(1e-9, 1e-9), case_sim::MotorMode::BalanceOnly);
+  EXPECT_EQ(case_sim::firmware_mode_from_command(1.0, 0.0), case_sim::MotorMode::ForwardAssist);
+  EXPECT_EQ(case_sim::firmware_mode_from_command(-1.0, 0.0), case_sim::MotorMode::BackwardAssist);
+}
+
+// The steer term is differential, so it adds nothing to the net forward command
+// the pitch loop sees. Steering cannot destabilise balance by construction.
+TEST(LeanOffsetWheelDrive, SteeringIsPurelyDifferential)
+{
+  const case_sim::WheelDrive straight = case_sim::lean_offset_wheel_drive(100, 0.0);
+  EXPECT_EQ(straight.left_pwm, 100);
+  EXPECT_EQ(straight.right_pwm, 100);
+
+  const case_sim::WheelDrive turning = case_sim::lean_offset_wheel_drive(100, 40.0);
+  EXPECT_EQ(turning.left_pwm, 60) << "positive yaw slows the left wheel";
+  EXPECT_EQ(turning.right_pwm, 140);
+  EXPECT_EQ(turning.left_pwm + turning.right_pwm, straight.left_pwm + straight.right_pwm);
+}
+
+TEST(LeanOffsetWheelDrive, ClampsToTheCommandableRange)
+{
+  const case_sim::WheelDrive saturated = case_sim::lean_offset_wheel_drive(250, 100.0);
+  EXPECT_EQ(saturated.right_pwm, 255);
+  EXPECT_EQ(saturated.left_pwm, 150);
+  EXPECT_FALSE(saturated.coasting);
+}
