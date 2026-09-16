@@ -16,9 +16,16 @@ Create a **ROS 2 Jazzy** rosject, then in its web shell:
 
 ```bash
 cd ~/ros2_ws/src
-git clone <this repo>          # colcon recurses and finds ros2/case_sim
-cd ~/ros2_ws && colcon build --packages-select case_sim && source install/setup.bash
+# -b matters: this package is not on main.
+git clone -b feat/workflow https://github.com/samirbhattarai135/TARS-CASE.git
+cd ~/ros2_ws
+rosdep install --from-paths src -y --ignore-src   # only if the build reports missing deps
+colcon build --packages-select case_sim
+source install/setup.bash
 ```
+
+colcon recurses from `src/` and finds `TARS-CASE/ros2/case_sim/package.xml`, so
+the repository can be cloned whole; no symlink or file moving is needed.
 
 ### 1. Benchmark first — always
 
