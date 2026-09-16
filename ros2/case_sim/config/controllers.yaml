@@ -68,8 +68,7 @@ balance_controller:
     delay_samples: 2
     angle_noise_sigma_deg: 0.10
     rotation_artifact_enabled: true
-    rotation_artifact_gain_deg_s2: 0.002
-
+    imu_lever_arm_m: 0.03
     # tau = kt * (supply_voltage_v * pwm/255 - back_emf_constant_kv * omega) / resistance_ohm
     torque_constant_kt: 0.073
     back_emf_constant_kv: 0.287

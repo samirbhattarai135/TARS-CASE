@@ -90,13 +90,20 @@ sensor:
   rotation_artifact_enabled:
     nominal: true
     range: [false, true]
-  # Scales the artifact with |angular acceleration|.
-  # ponytail: crude stand-in for real accelerometer contamination during
-  # rotation. Upgrade to a modelled accel/gravity-vector error if the sweep
-  # turns out sensitive to it.
-  rotation_artifact_gain_deg_s2:
-    nominal: 0.002
-    range: [0.001, 0.005]
+  # Distance from the chassis rotation centre to the IMU. Rotating at omega,
+  # the sensor measures a centripetal omega^2 * r on top of gravity, tilting
+  # the fused "down" by atan(omega^2 * r / g) -- a bias in a known direction,
+  # not noise.
+  #
+  # This replaces a gain on |angular acceleration| that was both dimensionally
+  # wrong and numerically explosive: differentiating pitch twice divides by
+  # dt^2, and on 2026-09-16 it injected swings of tens of degrees per cycle and
+  # a 409-degree sample, which the PID then saturated on and fell over.
+  #
+  # Measurable rather than fudged: it is the z component of imu_offset_xyz_m.
+  imu_lever_arm_m:
+    nominal: 0.030
+    range: [0.020, 0.050]
 
 controller:
   # Gains as written in case_voice/balance_control.cpp. PID_v1 pre-scales Ki and

@@ -34,6 +34,8 @@ namespace
 {
 
 constexpr double kRadiansToDegrees = 180.0 / M_PI;
+constexpr double kDegreesToRadians = M_PI / 180.0;
+constexpr double kGravity = 9.8;
 constexpr double kUprightDeg = 180.0;
 
 using Float64Publisher = realtime_tools::RealtimePublisher<std_msgs::msg::Float64>;
@@ -115,7 +117,7 @@ private:
   int delay_samples_{0};
   double angle_noise_sigma_deg_{0.0};
   bool rotation_artifact_enabled_{false};
-  double rotation_artifact_gain_deg_s2_{0.0};
+  double imu_lever_arm_m_{0.030};
   int noise_seed_{0};
   double motor_direction_sign_{1.0};
 
@@ -126,7 +128,6 @@ private:
   std::size_t delay_write_index_{0};
 
   double previous_pitch_deg_{0.0};
-  double previous_pitch_rate_deg_s_{0.0};
   int pitch_history_depth_{0};
 
   std::mt19937 noise_rng_;
@@ -189,7 +190,7 @@ controller_interface::CallbackReturn BalanceController::on_init()
     declare_from_sweep_ranges("angle_noise_sigma_deg", rclcpp::PARAMETER_DOUBLE);
     declare_from_sweep_ranges("rotation_artifact_enabled", rclcpp::PARAMETER_BOOL);
     declare_from_sweep_ranges("reproduce_startup_windup", rclcpp::PARAMETER_BOOL);
-    declare_from_sweep_ranges("rotation_artifact_gain_deg_s2", rclcpp::PARAMETER_DOUBLE);
+    declare_from_sweep_ranges("imu_lever_arm_m", rclcpp::PARAMETER_DOUBLE);
 
     declare_from_sweep_ranges("torque_constant_kt", rclcpp::PARAMETER_DOUBLE);
     declare_from_sweep_ranges("back_emf_constant_kv", rclcpp::PARAMETER_DOUBLE);
@@ -244,8 +245,6 @@ controller_interface::CallbackReturn BalanceController::on_configure(
     angle_noise_sigma_deg_ = node->get_parameter("angle_noise_sigma_deg").as_double();
     rotation_artifact_enabled_ = node->get_parameter("rotation_artifact_enabled").as_bool();
     reproduce_startup_windup_ = node->get_parameter("reproduce_startup_windup").as_bool();
-    rotation_artifact_gain_deg_s2_ =
-      node->get_parameter("rotation_artifact_gain_deg_s2").as_double();
 
     motor_params_.torque_constant_kt = node->get_parameter("torque_constant_kt").as_double();
     motor_params_.back_emf_constant_kv = node->get_parameter("back_emf_constant_kv").as_double();
@@ -274,8 +273,8 @@ controller_interface::CallbackReturn BalanceController::on_configure(
     RCLCPP_ERROR(node->get_logger(), "delay_samples must not be negative");
     return controller_interface::CallbackReturn::ERROR;
   }
-  if (angle_noise_sigma_deg_ < 0.0 || rotation_artifact_gain_deg_s2_ < 0.0) {
-    RCLCPP_ERROR(node->get_logger(), "noise sigma and artifact gain must not be negative");
+  if (angle_noise_sigma_deg_ < 0.0 || imu_lever_arm_m_ < 0.0) {
+    RCLCPP_ERROR(node->get_logger(), "noise sigma and IMU lever arm must not be negative");
     return controller_interface::CallbackReturn::ERROR;
   }
   if (motor_params_.resistance_ohm <= 0.0) {
@@ -416,7 +415,6 @@ controller_interface::CallbackReturn BalanceController::on_activate(
   delay_write_index_ = 0;
 
   previous_pitch_deg_ = 0.0;
-  previous_pitch_rate_deg_s_ = 0.0;
   pitch_history_depth_ = 0;
 
   noise_rng_.seed(static_cast<std::mt19937::result_type>(noise_seed_));
@@ -482,23 +480,17 @@ controller_interface::return_type BalanceController::update(
   const double pitch_deg = dmp_pitch_rad(qw, qx, qy, qz) * kRadiansToDegrees + kUprightDeg;
 
   // Differentiated from the true pitch rather than the degraded one. The
-  // rotation artifact models contamination driven by the chassis's actual
-  // motion; differentiating the noisy delayed signal twice instead would
-  // manufacture an artifact out of the noise it is supposed to describe.
+  // centripetal model needs the chassis's actual rate, so it is differentiated
+  // from the true pitch rather than the delayed noisy one -- otherwise the
+  // artifact would be manufactured out of the noise it is meant to describe.
+  // First derivative only: the second one was what made this term explode.
   const double dt = period.seconds();
   double pitch_rate_deg_s = 0.0;
-  double pitch_accel_deg_s2 = 0.0;
-  if (dt > 0.0) {
-    if (pitch_history_depth_ >= 1) {
-      pitch_rate_deg_s = (pitch_deg - previous_pitch_deg_) / dt;
-    }
-    if (pitch_history_depth_ >= 2) {
-      pitch_accel_deg_s2 = (pitch_rate_deg_s - previous_pitch_rate_deg_s_) / dt;
-    }
+  if (dt > 0.0 && pitch_history_depth_ >= 1) {
+    pitch_rate_deg_s = (pitch_deg - previous_pitch_deg_) / dt;
   }
   previous_pitch_deg_ = pitch_deg;
-  previous_pitch_rate_deg_s_ = pitch_rate_deg_s;
-  if (pitch_history_depth_ < 2) {
+  if (pitch_history_depth_ < 1) {
     ++pitch_history_depth_;
   }
 
@@ -509,7 +501,6 @@ controller_interface::return_type BalanceController::update(
     pid_->initialize(pitch_deg, 0.0);
     std::fill(pitch_delay_buffer_.begin(), pitch_delay_buffer_.end(), pitch_deg);
     previous_pitch_deg_ = pitch_deg;
-    previous_pitch_rate_deg_s_ = 0.0;
     pitch_history_depth_ = 0;
     pid_initialised_ = true;
   }
@@ -524,13 +515,27 @@ controller_interface::return_type BalanceController::update(
   // distribution, so a sigma of zero needs no special case.
   measured_pitch_deg += angle_noise_sigma_deg_ * standard_normal_(noise_rng_);
 
-  // ponytail: crude stand-in for real accelerometer contamination -- the IMU
-  // sits off the centre of mass, so fast rotation corrupts the gravity vector
-  // the DMP fuses against. Upgrade to a modelled gravity-vector error if the
-  // sweep turns out sensitive to it.
+  // Centripetal contamination of the gravity vector the DMP fuses against.
+  //
+  // The IMU sits a lever arm from the rotation centre, so rotating at omega it
+  // measures a centripetal acceleration omega^2 * r on top of gravity. The
+  // fused "down" therefore tilts by atan(omega^2 * r / g), a bias in a known
+  // direction rather than noise -- a real sensor leans its estimate the same
+  // way every time it swings the same way.
+  //
+  // The previous model multiplied a random draw by |angular ACCELERATION|,
+  // which is pitch differentiated twice: a division by dt^2 that amplified any
+  // wobble ten-thousand-fold at dt = 0.01. Measured 2026-09-16, it injected
+  // swings of tens of degrees between adjacent cycles and one sample of 409
+  // degrees -- outside the 0..360 the convention allows -- and the PID
+  // saturated on that noise and threw the robot over. It was also
+  // dimensionally wrong: this error depends on angular rate, not acceleration.
+  //
+  // atan bounds the result by construction, so no transient can make it large.
   if (rotation_artifact_enabled_) {
-    measured_pitch_deg +=
-      rotation_artifact_gain_deg_s2_ * std::abs(pitch_accel_deg_s2) * standard_normal_(noise_rng_);
+    const double omega_rad_s = pitch_rate_deg_s * kDegreesToRadians;
+    measured_pitch_deg += kRadiansToDegrees * std::atan2(
+      omega_rad_s * omega_rad_s * imu_lever_arm_m_, kGravity);
   }
 
   const double setpoint_deg = kUprightDeg + lean_deg_;
