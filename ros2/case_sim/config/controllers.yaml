@@ -69,7 +69,7 @@ balance_controller:
     # Sensor degradation applied to the ground-truth orientation the IMU reports.
     delay_samples: 2
     angle_noise_sigma_deg: 0.10
-    rotation_artifact_enabled: true
+    rotation_artifact_enabled: false
     imu_lever_arm_m: 0.03
     # tau = kt * (supply_voltage_v * pwm/255 - back_emf_constant_kv * omega) / resistance_ohm
     torque_constant_kt: 0.073

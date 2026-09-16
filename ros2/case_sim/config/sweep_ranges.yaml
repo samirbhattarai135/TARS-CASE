@@ -87,9 +87,26 @@ sensor:
   angle_noise_sigma_deg:
     nominal: 0.10
     range: [0.05, 0.30]
-  rotation_artifact_enabled:
-    nominal: true
-    range: [false, true]
+  # DISABLED pending a correct model. Two attempts, both wrong, both measurably
+  # harmful:
+  #
+  #   1. gain * |angular acceleration| * N(0,1) -- pitch differentiated twice
+  #      divides by dt^2, injecting tens of degrees of noise per cycle and one
+  #      sample of 409 degrees, outside the range the convention allows.
+  #   2. atan(omega^2 * r / g) -- bounded, but omega^2 is always positive, so it
+  #      adds a ONE-SIDED bias (0.8 deg at 2 rad/s) that Ki=140 integrates into a
+  #      sustained wrong command. It is also the wrong term: centripetal
+  #      acceleration points ALONG the lever arm, changing the magnitude of
+  #      measured gravity rather than its direction. The tangential term,
+  #      alpha x r, is what tilts the apparent vertical.
+  #
+  # Measured 2026-09-16 across two 60-run sweeps: all 5 passing runs had this
+  # off, and no run with it enabled ever passed.
+  #
+  # A correct model is atan(alpha * r / g), signed and bounded, computed from
+  # true pitch. Until that is implemented and tested it stays off, because a
+  # wrong sensor model is worse than an absent one.
+  rotation_artifact_enabled: false
   # Distance from the chassis rotation centre to the IMU. Rotating at omega,
   # the sensor measures a centripetal omega^2 * r on top of gravity, tilting
   # the fused "down" by atan(omega^2 * r / g) -- a bias in a known direction,
