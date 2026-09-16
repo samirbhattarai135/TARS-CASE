@@ -18,7 +18,11 @@ Visualization Manager:
     # robot_state_publisher always provides base_link, so this always resolves.
     # Switch the dropdown to the world frame (see the pose bridge in the launch
     # file) to watch the chassis tilt instead of spinning in place.
-    Fixed Frame: base_link
+    # case_world is the ground-truth world frame from the pose bridge, joined
+    # to base_link by the static transform in the launch file. This is the frame
+    # that shows the chassis tilting; base_link would show it standing still
+    # forever, which for a balancer hides the only interesting motion.
+    Fixed Frame: case_world
     Frame Rate: 30
   Displays:
     - Class: rviz_default_plugins/Grid

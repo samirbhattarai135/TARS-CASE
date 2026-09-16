@@ -135,6 +135,10 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
             "real_time_factor": 0.0,
             "activation_timeout_s": 60.0,
             "result_file": "/tmp/case_run.json",
+            # Non-empty: write the full per-sample trace here as CSV. Off by
+            # default because a sweep wants verdicts, not traces; indispensable
+            # when a run fails for a reason no summary statistic can show.
+            "trace_file": "",
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -160,6 +164,9 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
         # initial condition, and with several seconds of standing counted as
         # part of the settling window.
         self._arming_enabled = False
+        self._trace: list[tuple[float, float, float, float]] = []
+        self._latest_pid_output = 0.0
+        self._latest_pwm = 0.0
 
         # The controller publishes through a real-time publisher. Best-effort
         # here costs nothing and keeps the subscription from imposing delivery
@@ -167,6 +174,7 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
         qos = QoSProfile(depth=200, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.create_subscription(Float64, "/case/pitch", self._on_pitch, qos)
         self.create_subscription(Float64, "/case/pwm", self._on_pwm, qos)
+        self.create_subscription(Float64, "/case/pid_output", self._on_pid_output, qos)
 
     # ---- startup ---------------------------------------------------------
 
@@ -205,6 +213,16 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
         and tilting afterwards gives the run a clean, identical initial condition
         no matter how long activation took.
         """
+        # Pause first. Each gz command below is a subprocess taking a good
+        # fraction of a wall second, and physics is running at real time -- so
+        # without this the robot is tilted and actively driven for a second or
+        # more BEFORE the run arms, and the measurement starts mid-fall. A slow
+        # fall survives that window and a fast one does not, which silently
+        # makes the two incomparable. Pausing costs no simulation time, and is
+        # safe now only because the controller is already active: a world paused
+        # before activation can never activate one at all.
+        self._set_paused(True)
+
         tilt_rad = math.radians(self._p["initial_tilt_deg"])
         self._gz_publish(
             f"/world/{self._p['world_name']}/set_pose",
@@ -224,6 +242,7 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
         )
 
         self._arming_enabled = True
+        self._set_paused(False)
         self.create_timer(0.01, self._tick)
 
     # ---- run loop --------------------------------------------------------
@@ -240,10 +259,17 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
             self._armed = True
             self._start_sim_s = self._sim_now_s()
 
-        self._pitch.append((self._sim_now_s() - self._start_sim_s, msg.data))
+        elapsed = self._sim_now_s() - self._start_sim_s
+        self._pitch.append((elapsed, msg.data))
+        if self._p["trace_file"]:
+            self._trace.append((elapsed, msg.data, self._latest_pid_output, self._latest_pwm))
 
     def _on_pwm(self, msg: Float64) -> None:
         self._pwm.append(abs(msg.data))
+        self._latest_pwm = msg.data
+
+    def _on_pid_output(self, msg: Float64) -> None:
+        self._latest_pid_output = msg.data
 
     def _tick(self) -> None:
         if self._finished or self._start_sim_s is None:
@@ -256,6 +282,13 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
 
         if elapsed >= self._p["duration_s"]:
             self._finish()
+
+    def _set_paused(self, paused: bool) -> None:
+        self._gz_publish(
+            f"/world/{self._p['world_name']}/control",
+            "gz.msgs.WorldControl",
+            f"pause: {'true' if paused else 'false'}",
+        )
 
     def _apply_impulse(self) -> None:
         """Deliver the disturbance as a single-step wrench.
@@ -322,6 +355,13 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
             if outcome is not None:
                 result["outcome"] = outcome
                 result["passed"] = outcome == "pass"
+
+        if self._p["trace_file"] and self._trace:
+            with open(self._p["trace_file"], "w") as handle:
+                handle.write("t_s,pitch_deg,pid_output,pwm\n")
+                for row in self._trace:
+                    handle.write("%.4f,%.6f,%.6f,%.6f\n" % row)
+            self.get_logger().info(f"trace written to {self._p['trace_file']}")
 
         Path(self._p["result_file"]).write_text(json.dumps(result, indent=2))
         self.get_logger().info(f"run finished: {result['outcome']}")

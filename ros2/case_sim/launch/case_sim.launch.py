@@ -98,6 +98,7 @@ def _setup(context, *_args, **_kwargs):
 
     gui = LaunchConfiguration("gui").perform(context).strip().lower() in ("1", "true", "yes")
     result_file = LaunchConfiguration("result_file").perform(context)
+    trace_file = LaunchConfiguration("trace_file").perform(context)
     seed = int(LaunchConfiguration("seed").perform(context))
 
     xacro_path = Path(share) / "urdf" / "case.urdf.xacro"
@@ -150,6 +151,7 @@ def _setup(context, *_args, **_kwargs):
                 "model_name": "case",
                 "controller_name": "balance_controller",
                 "result_file": result_file,
+                "trace_file": trace_file,
                 "gate_lower_deg": control["gate_lower_deg"],
                 "gate_upper_deg": control["gate_upper_deg"],
                 "lean_deg": control["lean_deg"],
@@ -178,6 +180,16 @@ def _setup(context, *_args, **_kwargs):
                 "/model/case/pose@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V",
             ],
             remappings=[("/model/case/pose", "/tf")],
+            output="log",
+        ),
+        # The pose bridge publishes case_world -> case, and
+        # robot_state_publisher owns base_link downward. Without this identity
+        # link the two trees never join and RViz reports "No transform from
+        # [case] to [base_link]" -- which is exactly what it did.
+        Node(
+            package="tf2_ros",
+            executable="static_transform_publisher",
+            arguments=["0", "0", "0", "0", "0", "0", "case", "base_link"],
             output="log",
         ),
         IncludeLaunchDescription(
@@ -266,6 +278,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("gui", default_value="true"),
         DeclareLaunchArgument("seed", default_value="0"),
         DeclareLaunchArgument("result_file", default_value="/tmp/case_run.json"),
+        DeclareLaunchArgument("trace_file", default_value=""),
     ]
     for block in XACRO_BLOCKS + CONTROLLER_BLOCKS + SUPERVISOR_BLOCKS:
         for name, default in _leaf_defaults(ranges.get(block, {})).items():
