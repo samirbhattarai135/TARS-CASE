@@ -127,6 +127,10 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
             "duration_s": 10.0,
             "initial_tilt_deg": 2.0,
             "tilt_tolerance_deg": 0.5,
+            # Consecutive samples that must sit at the tilt before measuring.
+            # 5 at 100 Hz is 50 ms of holding still -- long enough that a robot
+            # swinging through the angle cannot satisfy it.
+            "arm_stable_samples": 5,
             # Roughly a second of samples at 100 Hz. Long enough for a queued
             # pose command to be applied, short enough that a run which will
             # never reach its initial condition fails quickly.
@@ -175,6 +179,7 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
         self._next_progress_s = 0.0
         self._initial_pitch_deg = float("nan")
         self._tilt_wait_samples = 0
+        self._at_tilt_streak = 0
 
         # The controller publishes through a real-time publisher. Best-effort
         # here costs nothing and keeps the subscription from imposing delivery
@@ -282,6 +287,7 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
             # defined initial condition the run claims to test.
             tilt = self._p["initial_tilt_deg"]
             if abs(abs(msg.data - UPRIGHT_DEG) - tilt) > self._p["tilt_tolerance_deg"]:
+                self._at_tilt_streak = 0
                 self._tilt_wait_samples += 1
                 if self._tilt_wait_samples > self._p["tilt_wait_limit"]:
                     self._finish(
@@ -289,6 +295,19 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
                         detail=f"initial tilt of {tilt} deg never appeared; "
                                f"last pitch {msg.data:.2f}",
                     )
+                return
+
+            # One sample at the right angle is not the right initial
+            # condition: a robot already falling sweeps through that angle on
+            # its way out of the gate, and arming there starts the measurement
+            # mid-flight. Observed 2026-09-16: a robot that passed in the sweep
+            # armed at 181.55 while tumbling and failed 5 ms later. Requiring
+            # the angle to PERSIST distinguishes at-rest from passing-through,
+            # and unlike a rate threshold it needs no dt and tolerates sensor
+            # noise.
+            self._at_tilt_streak += 1
+            if self._at_tilt_streak < self._p["arm_stable_samples"]:
+                self._tilt_wait_samples += 1
                 return
 
             self._armed = True
