@@ -272,6 +272,18 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
             # the data rather than silently averaged into the sweep.
             self._initial_pitch_deg = msg.data
 
+            # The set_pose service can report success without moving anything,
+            # which is how several runs started upright while recording a 2
+            # degree tilt. Trust the measurement, not the return code.
+            expected = UPRIGHT_DEG - self._p["initial_tilt_deg"]
+            alternative = UPRIGHT_DEG + self._p["initial_tilt_deg"]
+            if min(abs(msg.data - expected), abs(msg.data - alternative)) > 0.5:
+                self.get_logger().error(
+                    f"initial pitch {msg.data:.2f} matches neither "
+                    f"{expected:.2f} nor {alternative:.2f}: the tilt did not "
+                    f"take effect, so this run did not start where it claims"
+                )
+
         elapsed = self._sim_now_s() - self._start_sim_s
         self._pitch.append((elapsed, msg.data))
         if self._p["trace_file"]:
