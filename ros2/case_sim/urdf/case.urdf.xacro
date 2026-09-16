@@ -108,9 +108,15 @@
         <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
         <material name="case_tyre"/>
       </visual>
+      <!-- Sphere, while the VISUAL stays a cylinder. In the pitch plane a
+           rolling wheel touches the ground at one point, so a sphere of the
+           same radius is the same contact. Cylinder-on-plane is badly
+           conditioned in DART/ODE for a light wheel under high torque and
+           aborted the collision solver on roughly 40% of runs. The dynamics
+           being measured are unchanged; the numerics are not. -->
       <collision>
-        <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
-        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry><sphere radius="${wheel_radius}"/></geometry>
       </collision>
       <inertial>
         <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
