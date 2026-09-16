@@ -503,6 +503,10 @@ def run_single(
 
     argv = launch_argv(params, result_file, seed + index, overrides)
     LOG.debug("run %d: %s", index, " ".join(argv))
+    # Announced before launching, not only on completion. A run is ~50 s of
+    # silence otherwise, which reads as a hang and invites an interrupt that
+    # throws away the whole sweep.
+    LOG.info("run %d: starting (Gazebo startup ~10 s, then 10 s simulated)", index)
     timed_out, wall, output = execute_run(argv, timeout_s, index)
 
     row: dict[str, object] = {"run_index": index, "seed": seed, "wall_s": round(wall, 3)}
