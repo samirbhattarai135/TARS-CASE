@@ -298,6 +298,16 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
 
         elapsed = self._sim_now_s() - self._start_sim_s
         self._pitch.append((elapsed, msg.data))
+
+        # End the run the moment the gate is left. The firmware has coasted the
+        # motors and the robot is gone, so the rest of the run adds nothing --
+        # and it is not free: the chassis tumbles, pitch sweeps back through the
+        # band, full torque is commanded again mid-air, and the resulting
+        # contact violence aborts ODE's collision solver often enough to have
+        # destroyed roughly 40% of runs in the first sweep. Stopping at the
+        # verdict removes that regime entirely and makes a failing run fast.
+        if not in_band(msg.data, self._p["gate_lower_deg"], self._p["gate_upper_deg"]):
+            self._finish()
         if self._p["trace_file"]:
             self._trace.append((elapsed, msg.data, self._latest_pid_output, self._latest_pwm))
 
