@@ -147,6 +147,7 @@ private:
   bool reproduce_startup_windup_{false};
   bool holding_{true};
   double hold_release_deg_{1.0};
+  int output_divisor_{2};
   bool pid_initialised_{true};
   std::uint64_t command_write_failures_{0};
   std::uint64_t state_read_failures_{0};
@@ -193,6 +194,7 @@ controller_interface::CallbackReturn BalanceController::on_init()
     declare_from_sweep_ranges("rotation_artifact_enabled", rclcpp::PARAMETER_BOOL);
     declare_from_sweep_ranges("reproduce_startup_windup", rclcpp::PARAMETER_BOOL);
     declare_from_sweep_ranges("hold_release_deg", rclcpp::PARAMETER_DOUBLE);
+    declare_from_sweep_ranges("output_divisor", rclcpp::PARAMETER_INTEGER);
     declare_from_sweep_ranges("imu_lever_arm_m", rclcpp::PARAMETER_DOUBLE);
 
     declare_from_sweep_ranges("torque_constant_kt", rclcpp::PARAMETER_DOUBLE);
@@ -249,6 +251,7 @@ controller_interface::CallbackReturn BalanceController::on_configure(
     rotation_artifact_enabled_ = node->get_parameter("rotation_artifact_enabled").as_bool();
     reproduce_startup_windup_ = node->get_parameter("reproduce_startup_windup").as_bool();
     hold_release_deg_ = node->get_parameter("hold_release_deg").as_double();
+    output_divisor_ = static_cast<int>(node->get_parameter("output_divisor").as_int());
 
     motor_params_.torque_constant_kt = node->get_parameter("torque_constant_kt").as_double();
     motor_params_.back_emf_constant_kv = node->get_parameter("back_emf_constant_kv").as_double();
@@ -587,7 +590,7 @@ controller_interface::return_type BalanceController::update(
     command_effort(left_effort_index_, 0.0);
     command_effort(right_effort_index_, 0.0);
   } else {
-    pwm = pwm_from_pid_output(pid_->output(), deadzone_pwm_);
+    pwm = pwm_from_pid_output(pid_->output(), deadzone_pwm_, output_divisor_);
 
     // Both wheels take the same command: BALANCE_ONLY is the only mode
     // simulated, and it never steers.

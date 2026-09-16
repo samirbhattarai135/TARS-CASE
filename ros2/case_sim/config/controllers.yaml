@@ -64,6 +64,7 @@ balance_controller:
     # See sweep_ranges.yaml: on, the startup lurch topples the robot in 16 ms.
     reproduce_startup_windup: false
     hold_release_deg: 1.0
+    output_divisor: 2
 
     # Sensor degradation applied to the ground-truth orientation the IMU reports.
     delay_samples: 2

@@ -31,13 +31,21 @@ struct MotorParams
 /// deadzone_pwm = 20. The firmware cannot request full torque at any tilt. That
 /// bounds the recoverable angle and is the behaviour under test, not a defect to
 /// correct here.
-inline int pwm_from_pid_output(double pid_output, int deadzone_pwm)
+// output_divisor is the firmware's `output / 2`. It is a parameter, not a
+// constant, because that single division caps the robot at ~54% of its motors'
+// speed once the deadzone remap is applied -- and the 2026-09-16 sweep found
+// wheel top speed (low back-EMF constant) to be the strongest discriminator
+// between balancing and falling, ahead of torque. Setting it to 1 answers
+// whether removing one character from the firmware materially changes
+// stability. Default 2 is the firmware as written.
+inline int pwm_from_pid_output(double pid_output, int deadzone_pwm, int output_divisor = 2)
 {
   const int base_pwm = static_cast<int>(pid_output);
 
-  // forward()/reverse() constrain the already-halved value rather than the PID
+  // forward()/reverse() constrain the already-divided value rather than the PID
   // output, which is why the return range is [-255, 255] and not [-137, 137].
-  const int requested = std::clamp(std::abs(base_pwm) / 2, 0, 255);
+  const int divisor = output_divisor > 0 ? output_divisor : 1;
+  const int requested = std::clamp(std::abs(base_pwm) / divisor, 0, 255);
 
   // skipDeadzone(): zero stays zero, so "no correction" still means "no drive".
   // deadzone_pwm == 0 collapses the remap to the identity and reproduces

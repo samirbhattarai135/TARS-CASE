@@ -114,3 +114,31 @@ TEST(IsCoasting, GateBoundsCoastAndTheInteriorDrives)
   EXPECT_FALSE(case_sim::is_coasting(180.0, 150.0, 200.0));
   EXPECT_FALSE(case_sim::is_coasting(182.0, 150.0, 200.0));
 }
+
+
+// The firmware's halving is now a parameter; default behaviour must not move,
+// and removing it must genuinely raise the achievable PWM ceiling.
+TEST(MotorModel, OutputDivisorDefaultsToFirmwareBehaviour)
+{
+  for (double out = -255.0; out <= 255.0; out += 0.5) {
+    EXPECT_EQ(case_sim::pwm_from_pid_output(out, 20),
+              case_sim::pwm_from_pid_output(out, 20, 2))
+      << "default divisor must reproduce the firmware at output " << out;
+  }
+}
+
+TEST(MotorModel, RemovingTheHalvingRaisesTheCeiling)
+{
+  const int halved = case_sim::pwm_from_pid_output(255.0, 20, 2);
+  const int full = case_sim::pwm_from_pid_output(255.0, 20, 1);
+  EXPECT_EQ(halved, 137) << "firmware ceiling is 137 of 255, about 54% duty";
+  EXPECT_EQ(full, 255) << "without the halving the full range is reachable";
+  EXPECT_GT(full, halved);
+}
+
+TEST(MotorModel, OutputDivisorRejectsZero)
+{
+  // A zero divisor would be a division by zero on the control path.
+  EXPECT_EQ(case_sim::pwm_from_pid_output(100.0, 0, 0),
+            case_sim::pwm_from_pid_output(100.0, 0, 1));
+}
