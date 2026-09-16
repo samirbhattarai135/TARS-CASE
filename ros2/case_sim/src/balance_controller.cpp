@@ -139,8 +139,16 @@ private:
   double motor_direction_sign_{1.0};
 
   DriveMode drive_mode_{DriveMode::None};
-  double lean_gain_deg_{0.0};
+  double drive_gain_deg_per_m_s_{0.0};
+  double max_drive_lean_deg_{0.0};
   double steer_gain_pwm_{0.0};
+  double wheel_radius_m_{0.0};
+
+  // The outer drive loop's output, held across a cycle whose wheel speeds could
+  // not be read. Inventing a zero there would command the robot upright for one
+  // cycle and then lean again, which is a disturbance rather than a safe
+  // default. Zero in every mode but LeanOffset.
+  double drive_lean_deg_{0.0};
 
   MotorParams motor_params_{};
   std::optional<PidV1> pid_;
@@ -224,8 +232,14 @@ controller_interface::CallbackReturn BalanceController::on_init()
     declare_from_sweep_ranges("imu_lever_arm_m", rclcpp::PARAMETER_DOUBLE);
 
     declare_from_sweep_ranges("drive_mode", rclcpp::PARAMETER_STRING);
-    declare_from_sweep_ranges("lean_gain_deg", rclcpp::PARAMETER_DOUBLE);
+    declare_from_sweep_ranges("drive_gain_deg_per_m_s", rclcpp::PARAMETER_DOUBLE);
+    declare_from_sweep_ranges("max_drive_lean_deg", rclcpp::PARAMETER_DOUBLE);
     declare_from_sweep_ranges("steer_gain_pwm", rclcpp::PARAMETER_DOUBLE);
+
+    // Converts wheel rate to ground speed for the drive loop. Its single home
+    // is plant.wheel_radius_m, which the launch file passes here and the URDF
+    // builds the wheel from, so the loop cannot disagree with the geometry.
+    declare_from_sweep_ranges("wheel_radius", rclcpp::PARAMETER_DOUBLE);
 
     declare_from_sweep_ranges("torque_constant_kt", rclcpp::PARAMETER_DOUBLE);
     declare_from_sweep_ranges("back_emf_constant_kv", rclcpp::PARAMETER_DOUBLE);
@@ -285,8 +299,10 @@ controller_interface::CallbackReturn BalanceController::on_configure(
     output_divisor_ = static_cast<int>(node->get_parameter("output_divisor").as_int());
 
     drive_mode_name = node->get_parameter("drive_mode").as_string();
-    lean_gain_deg_ = node->get_parameter("lean_gain_deg").as_double();
+    drive_gain_deg_per_m_s_ = node->get_parameter("drive_gain_deg_per_m_s").as_double();
+    max_drive_lean_deg_ = node->get_parameter("max_drive_lean_deg").as_double();
     steer_gain_pwm_ = node->get_parameter("steer_gain_pwm").as_double();
+    wheel_radius_m_ = node->get_parameter("wheel_radius").as_double();
 
     motor_params_.torque_constant_kt = node->get_parameter("torque_constant_kt").as_double();
     motor_params_.back_emf_constant_kv = node->get_parameter("back_emf_constant_kv").as_double();
@@ -321,6 +337,10 @@ controller_interface::CallbackReturn BalanceController::on_configure(
   }
   if (motor_params_.resistance_ohm <= 0.0) {
     RCLCPP_ERROR(node->get_logger(), "resistance_ohm must be positive");
+    return controller_interface::CallbackReturn::ERROR;
+  }
+  if (wheel_radius_m_ <= 0.0) {
+    RCLCPP_ERROR(node->get_logger(), "wheel_radius must be positive");
     return controller_interface::CallbackReturn::ERROR;
   }
 
@@ -492,6 +512,7 @@ controller_interface::CallbackReturn BalanceController::on_activate(
   // A command left over from a previous activation would drive the robot the
   // instant the run arms, from a state the run protocol never defined.
   velocity_command_.writeFromNonRT(geometry_msgs::msg::Twist());
+  drive_lean_deg_ = 0.0;
 
   noise_rng_.seed(static_cast<std::mt19937::result_type>(noise_seed_));
   standard_normal_.reset();
@@ -649,15 +670,31 @@ controller_interface::return_type BalanceController::update(
   const double forward_command = (command != nullptr) ? command->linear.x : 0.0;
   const double turn_command = (command != nullptr) ? command->angular.z : 0.0;
 
-  // Lean into the direction of travel, and let the balance loop do the driving:
-  // holding a tilt IS moving forward on a balancer, so the wheels are never
-  // commanded forward directly and the pitch loop is never fighting a throttle
-  // it did not ask for. This is the one thing the firmware's assist modes do
-  // not do, and the reason this mode exists to be compared against them.
-  double setpoint_deg = kUprightDeg + lean_deg_;
-  if (drive_mode_ == DriveMode::LeanOffset) {
-    setpoint_deg += lean_gain_deg_ * forward_command;
+  // Wheel speed is needed twice now -- by the drive loop to know how fast the
+  // robot is actually going, and by the motor model for back-EMF -- so it is
+  // read once here rather than inside the command branch.
+  double left_raw = 0.0;
+  double right_raw = 0.0;
+  const bool velocities_valid =
+    read_state(state_interfaces_[left_velocity_index_], left_raw) &&
+    read_state(state_interfaces_[right_velocity_index_], right_raw);
+  // The sign mirrors the whole motor frame, wheel speed included. Flipping only
+  // the torque would leave back-EMF adding to the applied voltage instead of
+  // opposing it, turning the motor model into positive feedback.
+  const double left_velocity = motor_direction_sign_ * left_raw;
+  const double right_velocity = motor_direction_sign_ * right_raw;
+
+  // Outer loop: lean as much as is needed to reach the commanded speed, and no
+  // more. The lean is an output here, not an input -- see
+  // drive_lean_from_velocity_error for why a commanded lean cannot drive.
+  if (drive_mode_ == DriveMode::LeanOffset && velocities_valid) {
+    const double measured_velocity_m_s =
+      0.5 * (left_velocity + right_velocity) * wheel_radius_m_;
+    drive_lean_deg_ = drive_lean_from_velocity_error(
+      forward_command, measured_velocity_m_s, drive_gain_deg_per_m_s_, max_drive_lean_deg_);
   }
+
+  const double setpoint_deg = kUprightDeg + lean_deg_ + drive_lean_deg_;
 
   // Simulation time, never the wall clock: PID_v1's integral term is scaled by
   // the sample period, so timing drift would change what Ki=140 means.
@@ -693,21 +730,13 @@ controller_interface::return_type BalanceController::update(
     command_effort(left_effort_index_, 0.0);
     command_effort(right_effort_index_, 0.0);
   } else {
-    // The sign mirrors the whole motor frame, wheel speed included. Flipping
-    // only the torque would leave back-EMF adding to the applied voltage
-    // instead of opposing it, turning the motor model into positive feedback.
-    double left_raw = 0.0;
-    double right_raw = 0.0;
-    if (!read_state(state_interfaces_[left_velocity_index_], left_raw) ||
-        !read_state(state_interfaces_[right_velocity_index_], right_raw))
-    {
+    if (!velocities_valid) {
       // Back-EMF needs wheel speed. Without it the torque would be overstated
       // at exactly the speeds where balance is won or lost, so hold instead.
+      // Counted only here: a coasting cycle never needed the reading.
       ++state_read_failures_;
       return controller_interface::return_type::OK;
     }
-    const double left_velocity = motor_direction_sign_ * left_raw;
-    const double right_velocity = motor_direction_sign_ * right_raw;
     command_effort(
       left_effort_index_,
       motor_direction_sign_ * torque_from_pwm(drive.left_pwm, left_velocity, motor_params_));

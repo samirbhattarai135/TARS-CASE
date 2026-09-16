@@ -200,18 +200,27 @@ drive:
   #               against `firmware` on the same robots via --set drive_mode=.
   drive_mode: "none"
 
-  # Degrees of setpoint shift per m/s of commanded forward velocity, for
-  # lean_offset only.
+  # Degrees of lean per m/s of velocity ERROR, for lean_offset only. The drive
+  # is a proportional outer loop: `linear.x` in /cmd_vel is a target ground
+  # speed in m/s, and the lean is what the loop outputs to reach it.
   #
-  # SIGNED, and a calibration knob rather than a measurement: which way a
-  # positive shift leans depends on the quaternion-to-pitch convention in the
-  # controller and on the URDF joint axis directions, which were chosen
-  # independently -- the same ambiguity motor_direction_sign exists to resolve.
-  # If the robot drives away from the commanded direction, negate this.
+  # A commanded lean cannot drive -- measured 2026-09-16, at every magnitude
+  # from 0.75 to 12 degrees. A balancer holds a lean only while accelerating,
+  # so a fixed lean creeps or lurches once and stops. See
+  # drive_lean_from_velocity_error in src/motor_model.hpp.
   #
-  # Magnitude is a trade: too small and the robot barely moves, too large and
-  # the commanded tilt eats the recoverable angle the gains have left.
-  lean_gain_deg: 1.5
+  # SIGNED, and a calibration knob rather than a measurement: the relationship
+  # between wheel rotation and world forward depends on the URDF joint axes and
+  # the pitch convention, chosen independently -- the same ambiguity
+  # motor_direction_sign exists to resolve. If the robot drives away from the
+  # commanded direction, negate this.
+  drive_gain_deg_per_m_s: 6.0
+
+  # Ceiling on the lean the drive loop may command. Past what the wheels can
+  # sustain the robot simply falls, which is a slower way of not driving.
+  # 4 degrees asks for g*tan(4) = 0.69 m/s^2, near the limit of what the
+  # firmware's halved PWM can deliver.
+  max_drive_lean_deg: 4.0
 
   # PWM added to one wheel and subtracted from the other per rad/s of commanded
   # yaw, for lean_offset only. Differential, so it does not disturb the pitch

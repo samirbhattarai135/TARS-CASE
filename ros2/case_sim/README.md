@@ -87,11 +87,18 @@ If that package is not installed, anything publishing `geometry_msgs/Twist` on
 ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist '{linear: {x: 0.5}}'
 ```
 
-**If the robot drives the wrong way, negate `lean_gain_deg`** (or
+`linear.x` is a target ground speed in m/s. The lean is not commanded: an outer
+proportional loop leans however much is needed to reach that speed and stands
+the robot back up once it is there.
+
+**If the robot drives the wrong way, negate `drive_gain_deg_per_m_s`** (or
 `steer_gain_pwm` if it steers the wrong way). Both are signed calibration knobs
-for the same reason `motor_direction_sign` is: which way a positive setpoint
-shift leans depends on the pitch convention and the URDF joint axes, which were
-chosen independently.
+for the same reason `motor_direction_sign` is: the relationship between wheel
+rotation and world forward depends on the pitch convention and the URDF joint
+axes, which were chosen independently.
+
+**Set `deadzone_pwm:=0` for any driving demo.** At the firmware's 20 the robot
+does not drive at all -- see below.
 
 `drive_mode: "none"` is the default and is what every sweep measures. It is
 byte-identical to the controller before the drive existed, so results recorded
@@ -106,8 +113,12 @@ turn branches also bypass the deadzone remap and cannot steer at all while the
 robot is near upright, because both wheels take the sign of the balance output
 and only their speeds differ.
 
-`lean_offset` does what a balancer is supposed to do. It is a proposal for the
-firmware, not a description of it.
+`lean_offset` does what a balancer is supposed to do: `linear.x` is a target
+speed, and the lean is the outer loop's output rather than its input. A
+*commanded* lean cannot drive -- measured 2026-09-16 at every magnitude from
+0.75 to 12 degrees, because a balancer can hold a lean only while it is
+accelerating. Small leans creep, large ones lurch once and stop. It is a
+proposal for the firmware, not a description of it.
 
 Which is better is measurable rather than arguable, on the same robots:
 
@@ -180,7 +191,32 @@ the URDF expands and its masses sum correctly at both ends of every range; all
 launch arguments reach their consumers; the sweep's samples are in range and its
 strata evenly covered.
 
-Verified for the drive layer, on the same machine: routing `BALANCE_ONLY`
+### Measured on the rosject, 2026-09-16
+
+`deadzone_pwm: 20` makes the robot vibrate rather than balance. The wheels
+thrash at roughly 10 Hz over a 0.19 rad band with **zero net rotation**, so the
+robot cannot travel at all. Set `deadzone_pwm: 0` -- `self_balance.ino`'s
+uncompensated path -- and the oscillation vanishes: wheel position held constant
+to ten decimal places. The deadzone remap is the limit-cycle generator, exactly
+as `motor_model.hpp` predicted.
+
+This still counts as a **pass** in a sweep. The robot stays inside the
+150--200 gate indefinitely, and `rms_pitch_error_deg` is small because the
+*pitch* is quiet -- it is the wheels that thrash. The hunt metric measures the
+wrong axis to catch it, so some fraction of every stabilised-fraction reported
+so far may be robots vibrating in place. A net-wheel-rotation metric would
+separate them; it is not built.
+
+Below the deadzone there is a second dead band the remap cannot fix:
+`int basePWM = output` followed by `/ 2` truncates any `|output| < 2` to zero,
+so the firmware can command no torque at all for small corrections.
+
+The model itself is sound: deactivating the controller mid-lean drops the robot,
+so nothing in the contact model is propping it up.
+
+### Verified without ROS
+
+Routing `BALANCE_ONLY`
 through the new per-wheel path reproduces `pwm_from_pid_output` exactly over the
 whole output range, so `drive_mode: "none"` cannot have moved any earlier
 result; and the ported assist and turn branches match hand-computed firmware

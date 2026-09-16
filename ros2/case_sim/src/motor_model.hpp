@@ -200,13 +200,42 @@ inline MotorMode firmware_mode_from_command(
   return MotorMode::BalanceOnly;
 }
 
+/// Pitch offset that drives the robot at a commanded ground speed.
+///
+/// A balancer holds a lean only while it is accelerating -- the lean IS the
+/// acceleration. So commanding a FIXED lean cannot produce steady travel: the
+/// robot tilts, accelerates until the wheels run out of speed, can no longer
+/// sustain the tilt, and comes back upright. Measured 2026-09-16: that is
+/// exactly what a fixed lean does, at every magnitude. Small leans creep,
+/// large ones lurch once and stop.
+///
+/// Driving needs the lean to be an OUTPUT, not an input. Proportional on
+/// velocity error: far below the target the robot leans hard and accelerates,
+/// and as speed builds the error shrinks until it is travelling at the
+/// commanded speed nearly upright, where it can stay indefinitely.
+///
+/// The clamp keeps the commanded lean inside what the wheels can sustain.
+/// Past that the robot falls over, which is a slower way of not driving.
+///
+/// Signed gain, for the same reason motor_direction_sign is signed: the
+/// relationship between wheel rotation and world forward depends on the URDF
+/// joint axes and the pitch convention, chosen independently.
+inline double drive_lean_from_velocity_error(
+  double target_velocity_m_s, double measured_velocity_m_s, double gain_deg_per_m_s,
+  double max_lean_deg)
+{
+  const double limit = std::abs(max_lean_deg);
+  return std::clamp(
+    gain_deg_per_m_s * (target_velocity_m_s - measured_velocity_m_s), -limit, limit);
+}
+
 /// Steering split for the lean-offset drive. NOT firmware behaviour.
 ///
 /// Forward motion is deliberately absent here: it is a shift of the PID
-/// setpoint applied upstream, so the balance loop tilts the chassis into the
-/// direction of travel and then drives to hold that tilt. That is what lets a
-/// balancer go somewhere without fighting itself, and it is the one thing the
-/// firmware's assist modes do not do.
+/// setpoint, computed by drive_lean_from_velocity_error above, so the balance
+/// loop tilts the chassis into the direction of travel and then drives to hold
+/// that tilt. That is what lets a balancer go somewhere without fighting
+/// itself, and it is the one thing the firmware's assist modes do not do.
 ///
 /// What is left is the yaw term, which is differential: it adds to one wheel
 /// exactly what it subtracts from the other, so the net forward command the

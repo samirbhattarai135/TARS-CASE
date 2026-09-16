@@ -8,6 +8,12 @@ namespace
 constexpr int kFirmwareDeadzone = 20;   // MOTOR_DEADZONE_PWM in balance_control.cpp
 constexpr int kNoDeadzone = 0;          // self_balance.ino's actuator path
 
+// Nominal drive column of config/sweep_ranges.yaml.
+double drive_lean(double target_m_s, double measured_m_s)
+{
+  return case_sim::drive_lean_from_velocity_error(target_m_s, measured_m_s, 6.0, 4.0);
+}
+
 // Nominal column of config/sweep_ranges.yaml.
 case_sim::MotorParams nominal_motor()
 {
@@ -288,4 +294,33 @@ TEST(LeanOffsetWheelDrive, ClampsToTheCommandableRange)
   EXPECT_EQ(saturated.right_pwm, 255);
   EXPECT_EQ(saturated.left_pwm, 150);
   EXPECT_FALSE(saturated.coasting);
+}
+
+// At rest with a forward command the loop must ask for its full lean; once the
+// robot is up to speed it must ask for none, because a robot already travelling
+// at the commanded speed needs no acceleration and therefore no tilt.
+TEST(DriveLeanFromVelocityError, LeansToAccelerateAndStandsUpOnceUpToSpeed)
+{
+  EXPECT_DOUBLE_EQ(drive_lean(0.5, 0.5), 0.0) << "at speed, upright";
+  EXPECT_GT(drive_lean(0.5, 0.0), 0.0) << "below speed, lean forward";
+  EXPECT_LT(drive_lean(0.0, 0.5), 0.0) << "above speed, lean back to slow down";
+  EXPECT_GT(drive_lean(0.5, 0.25), 0.0);
+  EXPECT_LT(drive_lean(0.5, 0.25), drive_lean(0.5, 0.0)) << "smaller error, smaller lean";
+}
+
+// The clamp is what keeps the commanded lean inside what the wheels can hold.
+// Without it a large command asks for a tilt no torque can sustain, and the
+// robot lurches once and falls -- measured on 2026-09-16 at 12 degrees.
+TEST(DriveLeanFromVelocityError, ClampsToWhatTheWheelsCanSustain)
+{
+  EXPECT_DOUBLE_EQ(drive_lean(100.0, 0.0), 4.0);
+  EXPECT_DOUBLE_EQ(drive_lean(-100.0, 0.0), -4.0);
+  // A negative limit must clamp by magnitude, not invert the loop.
+  EXPECT_DOUBLE_EQ(
+    case_sim::drive_lean_from_velocity_error(100.0, 0.0, 6.0, -4.0), 4.0);
+}
+
+TEST(DriveLeanFromVelocityError, NegativeGainReversesTheDriveDirection)
+{
+  EXPECT_LT(case_sim::drive_lean_from_velocity_error(0.5, 0.0, -6.0, 4.0), 0.0);
 }
