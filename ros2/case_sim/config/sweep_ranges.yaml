@@ -138,9 +138,11 @@ controller:
   # controller drives the robot over faster than gravity would, and the failure
   # looks like "the gains are wrong" rather than like a sign error.
   #
-  # CALIBRATE: if the first run falls faster with the controller active than
-  # with it coasting, flip this. Real hardware has the same ambiguity, resolved
-  # by swapping motor leads.
+  # CONFIRMED +1.0 on 2026-09-16, by running both signs on identical seeds and
+  # comparing the first 9 ms: at +1 pitch oscillates within 1.7 degrees of
+  # upright, at -1 it diverges monotonically to 157 degrees. Do not change this
+  # without repeating that comparison -- an earlier test appeared to favour -1
+  # but ran through a broken sensor model and an unmeasured startup window.
   motor_direction_sign: 1.0
 
   # Reproduce the firmware's pre-DMP integrator wind-up at activation.

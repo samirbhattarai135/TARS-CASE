@@ -126,6 +126,11 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
             "physics_step_s": 0.001,
             "duration_s": 10.0,
             "initial_tilt_deg": 2.0,
+            "tilt_tolerance_deg": 0.5,
+            # Roughly a second of samples at 100 Hz. Long enough for a queued
+            # pose command to be applied, short enough that a run which will
+            # never reach its initial condition fails quickly.
+            "tilt_wait_limit": 100,
             "spawn_z_m": 0.039,
             "gate_lower_deg": 150.0,
             "gate_upper_deg": 200.0,
@@ -169,6 +174,7 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
         self._latest_pwm = 0.0
         self._next_progress_s = 0.0
         self._initial_pitch_deg = float("nan")
+        self._tilt_wait_samples = 0
 
         # The controller publishes through a real-time publisher. Best-effort
         # here costs nothing and keeps the subscription from imposing delivery
@@ -266,23 +272,29 @@ class RunSupervisor(Node if ROS_AVAILABLE else object):
                 return
             if not in_band(msg.data, self._p["gate_lower_deg"], self._p["gate_upper_deg"]):
                 return
+
+            # Wait for the tilt to actually be in the measurement, not merely
+            # requested. gz UserCommands queues set_pose and applies it on the
+            # next simulation step, so while the world is paused the command is
+            # pending -- and the first sample after unpausing can still be the
+            # pre-teleport attitude. Arming on that one starts every run from a
+            # perfect upright, which is a marginal equilibrium rather than the
+            # defined initial condition the run claims to test.
+            tilt = self._p["initial_tilt_deg"]
+            if abs(abs(msg.data - UPRIGHT_DEG) - tilt) > self._p["tilt_tolerance_deg"]:
+                self._tilt_wait_samples += 1
+                if self._tilt_wait_samples > self._p["tilt_wait_limit"]:
+                    self._finish(
+                        outcome="error",
+                        detail=f"initial tilt of {tilt} deg never appeared; "
+                               f"last pitch {msg.data:.2f}",
+                    )
+                return
+
             self._armed = True
             self._start_sim_s = self._sim_now_s()
-            # Recorded so a run that began from the wrong attitude is visible in
-            # the data rather than silently averaged into the sweep.
             self._initial_pitch_deg = msg.data
-
-            # The set_pose service can report success without moving anything,
-            # which is how several runs started upright while recording a 2
-            # degree tilt. Trust the measurement, not the return code.
-            expected = UPRIGHT_DEG - self._p["initial_tilt_deg"]
-            alternative = UPRIGHT_DEG + self._p["initial_tilt_deg"]
-            if min(abs(msg.data - expected), abs(msg.data - alternative)) > 0.5:
-                self.get_logger().error(
-                    f"initial pitch {msg.data:.2f} matches neither "
-                    f"{expected:.2f} nor {alternative:.2f}: the tilt did not "
-                    f"take effect, so this run did not start where it claims"
-                )
+            self.get_logger().info(f"armed at pitch {msg.data:.2f} (180 = upright)")
 
         elapsed = self._sim_now_s() - self._start_sim_s
         self._pitch.append((elapsed, msg.data))
