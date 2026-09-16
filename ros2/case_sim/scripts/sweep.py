@@ -446,6 +446,28 @@ def _terminate_group(process: subprocess.Popen) -> None:
             continue
 
 
+def _reap_survivors(process: subprocess.Popen) -> None:
+    """Kill anything left in the group after the launch leader has exited.
+
+    _terminate_group cannot do this job: it waits on the leader, which on a
+    clean exit is already gone, so it returns before escalating and leaves the
+    stragglers running. Here the leader's death is the precondition, so the
+    group is signalled directly.
+    """
+    # The group id is the leader's pid, because start_new_session makes the
+    # child a session and group leader. Taking it from process.pid rather than
+    # os.getpgid() is what makes this work at all: by the time we are called the
+    # leader has been reaped, and getpgid on a reaped pid raises, which would
+    # return early and leave every straggler running.
+    group = process.pid
+    for sig in (signal.SIGINT, signal.SIGKILL):
+        try:
+            os.killpg(group, sig)
+        except (ProcessLookupError, PermissionError):
+            return
+        time.sleep(0.5)
+
+
 def run_environment(index: int) -> dict[str, str]:
     """Fence each run onto its own ROS domain and Gazebo transport partition.
 
@@ -485,6 +507,14 @@ def execute_run(argv: list[str], timeout_s: float, index: int) -> tuple[bool, fl
         except subprocess.TimeoutExpired:
             output = ""
         return True, time.monotonic() - started, output
+
+    # Reap the group even on a clean exit. `ros2 launch` returning does not mean
+    # every child died: a crashed gz sim, or a spawner that needed SIGTERM, can
+    # outlive it. Survivors accumulate over a sweep and degrade the container --
+    # measured 2026-09-16, the ODE abort rate rose monotonically across four
+    # consecutive 60-run sweeps (8, 15, 17, 20 errors), which confounded every
+    # comparison between sweeps run at different times.
+    _reap_survivors(process)
     return False, time.monotonic() - started, output or ""
 
 
