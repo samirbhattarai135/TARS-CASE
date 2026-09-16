@@ -217,13 +217,21 @@ def _setup(context, *_args, **_kwargs):
             output="screen",
         ),
         supervisor,
-        # The supervisor owns the run's lifetime. Without this, it exits and
+    ]
+
+    if not gui:
+        # The supervisor owns a sweep run's lifetime. Without this, it exits and
         # Gazebo keeps running until sweep.py's wall-clock timeout kills the
         # launch -- making every run cost the full timeout.
-        RegisterEventHandler(
-            OnProcessExit(target_action=supervisor, on_exit=[EmitEvent(event=Shutdown())])
-        ),
-    ]
+        #
+        # Not in GUI mode: there, the run ending is the moment you most want to
+        # look at the robot, and tearing the scene down immediately also SIGINTs
+        # RViz mid-initialisation, which makes a clean run end in a stack trace.
+        actions.append(
+            RegisterEventHandler(
+                OnProcessExit(target_action=supervisor, on_exit=[EmitEvent(event=Shutdown())])
+            )
+        )
 
     if gui:
         actions.append(

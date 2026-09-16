@@ -41,18 +41,38 @@ plant:
   imu_offset_xyz_m: "0 0 0.030"
 
 motor:
-  # Unknown gearmotor. Constants swept across the range typical of small hobby
-  # gearmotors. A bench measurement of no-load RPM and stall PWM would narrow
-  # these substantially.
+  # Constants at the GEARBOX OUTPUT SHAFT, not the bare motor.
+  #
+  # The first values here were an order of magnitude too small: they described
+  # an ungeared motor, and the 2026-09-16 benchmark fell over because of it.
+  # Working it back, they capped base acceleration at 0.55 m/s^2, so the robot
+  # could not recover from a lean past 3.2 degrees and was started at 2. No set
+  # of gains can rescue that -- it is an actuator limit, not a tuning problem.
+  #
+  # Derived from datasheet form for a small geared robot motor, an N20 at
+  # 200 rpm / 6 V as the reference point:
+  #   Kv = V / no-load omega  = 6 / 20.9 rad/s      = 0.287 V.s/rad
+  #   R  = V / stall current  = 6 / 1.1 A           = 5.45 ohm
+  #   Kt = stall torque . R / V = 0.08 . 5.45 / 6   = 0.073 N.m/A
+  #
+  # Kt and Kv are NOT equal at the output shaft. They are equal in SI for a bare
+  # motor, but gearing multiplies speed reduction into Kv while torque gains
+  # only the reduction times efficiency, so Kt/Kv is roughly that efficiency
+  # (about 0.25 here). Setting them equal, as the first version did, models a
+  # lossless gearbox and overstates back-EMF braking badly.
+  #
+  # Ranges span plausible builds from an N20 up to a TT gearmotor.
+  # CALIBRATE: measure no-load RPM at 7.4 V and stall current; those two numbers
+  # replace this whole estimate.
   torque_constant_kt:
-    nominal: 0.0090
-    range: [0.0040, 0.0180]
+    nominal: 0.073
+    range: [0.040, 0.150]
   back_emf_constant_kv:
-    nominal: 0.0090
-    range: [0.0040, 0.0180]
+    nominal: 0.287
+    range: [0.150, 0.450]
   resistance_ohm:
-    nominal: 4.5
-    range: [2.0, 9.0]
+    nominal: 5.45
+    range: [3.0, 8.0]
   supply_voltage_v:
     nominal: 7.4
     range: [7.0, 8.4]      # 2S LiPo, discharged to fully charged
