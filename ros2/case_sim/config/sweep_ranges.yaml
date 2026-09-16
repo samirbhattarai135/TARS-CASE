@@ -136,6 +136,18 @@ controller:
   # by swapping motor leads.
   motor_direction_sign: 1.0
 
+  # Reproduce the firmware's pre-DMP integrator wind-up at activation.
+  #
+  # MEASURED 2026-09-16: with this on, the robot leaves the give-up band 16 ms
+  # after activation, for EITHER feedback sign, while gravity alone takes 4.3 s.
+  # The startup lurch is fatal to a free-standing robot; hardware survives it
+  # only because someone is holding the robot while it burns off.
+  #
+  # Off by default, or every run dies in the lurch and the sweep measures the
+  # startup sequence rather than the gains. Turn it on deliberately to quantify
+  # what the defect costs -- that is its own experiment, not this one.
+  reproduce_startup_windup: false
+
 run_protocol:
   initial_tilt_deg: 2.0
   settling_window_s: 3.0        # excluded from hunt measurement

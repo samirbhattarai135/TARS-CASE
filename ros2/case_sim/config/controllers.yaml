@@ -61,6 +61,9 @@ balance_controller:
     # controller active than coasting.
     motor_direction_sign: 1.0
 
+    # See sweep_ranges.yaml: on, the startup lurch topples the robot in 16 ms.
+    reproduce_startup_windup: false
+
     # Sensor degradation applied to the ground-truth orientation the IMU reports.
     delay_samples: 2
     angle_noise_sigma_deg: 0.10
@@ -68,7 +71,7 @@ balance_controller:
     rotation_artifact_gain_deg_s2: 0.002
 
     # tau = kt * (supply_voltage_v * pwm/255 - back_emf_constant_kv * omega) / resistance_ohm
-    torque_constant_kt: 0.0090
-    back_emf_constant_kv: 0.0090
-    resistance_ohm: 4.5
+    torque_constant_kt: 0.073
+    back_emf_constant_kv: 0.287
+    resistance_ohm: 5.45
     supply_voltage_v: 7.4

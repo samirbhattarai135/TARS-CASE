@@ -143,6 +143,8 @@ private:
   // cycle, which on a balancing robot is a real disturbance rather than a
   // logging concern -- so failures are counted and reported, never discarded.
   bool command_effort(std::size_t index, double value);
+  bool reproduce_startup_windup_{false};
+  bool pid_initialised_{true};
   std::uint64_t command_write_failures_{0};
   std::uint64_t state_read_failures_{0};
 
@@ -186,6 +188,7 @@ controller_interface::CallbackReturn BalanceController::on_init()
     declare_from_sweep_ranges("delay_samples", rclcpp::PARAMETER_INTEGER);
     declare_from_sweep_ranges("angle_noise_sigma_deg", rclcpp::PARAMETER_DOUBLE);
     declare_from_sweep_ranges("rotation_artifact_enabled", rclcpp::PARAMETER_BOOL);
+    declare_from_sweep_ranges("reproduce_startup_windup", rclcpp::PARAMETER_BOOL);
     declare_from_sweep_ranges("rotation_artifact_gain_deg_s2", rclcpp::PARAMETER_DOUBLE);
 
     declare_from_sweep_ranges("torque_constant_kt", rclcpp::PARAMETER_DOUBLE);
@@ -240,6 +243,7 @@ controller_interface::CallbackReturn BalanceController::on_configure(
     delay_samples_ = static_cast<int>(node->get_parameter("delay_samples").as_int());
     angle_noise_sigma_deg_ = node->get_parameter("angle_noise_sigma_deg").as_double();
     rotation_artifact_enabled_ = node->get_parameter("rotation_artifact_enabled").as_bool();
+    reproduce_startup_windup_ = node->get_parameter("reproduce_startup_windup").as_bool();
     rotation_artifact_gain_deg_s2_ =
       node->get_parameter("rotation_artifact_gain_deg_s2").as_double();
 
@@ -383,20 +387,32 @@ controller_interface::CallbackReturn BalanceController::on_activate(
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  // Deliberate reproduction of a probable firmware defect, not intended
-  // behaviour. BalanceControl::begin() calls SetMode(AUTOMATIC) before any DMP
-  // packet has arrived, so PID_v1 captures input = 0 against a setpoint near
-  // 180 and winds its integrator to the +255 clamp before the first real
-  // reading, which then lands as a large negative derivative kick. Initialising
-  // after the first reading would remove the transient; the simulation exists to
-  // measure the firmware as written, so it is reproduced rather than fixed.
-  pid_->initialize(0.0, 0.0);
-
-  // Zero-filled for the same reason: the firmware's `input` reads 0 until the
-  // first packet, so the coast gate holds and the integrator keeps winding.
-  // Hardware's pre-packet window is of unknown length; here it is delay_samples
-  // updates long.
-  std::fill(pitch_delay_buffer_.begin(), pitch_delay_buffer_.end(), 0.0);
+  // BalanceControl::begin() calls SetMode(AUTOMATIC) before any DMP packet has
+  // arrived, so PID_v1 captures input = 0 against a setpoint near 180, winds its
+  // integrator to the +255 clamp, and then takes a huge negative derivative kick
+  // when the first real reading lands.
+  //
+  // Measured 2026-09-16: that transient is FATAL to a free-standing robot. It
+  // leaves the give-up band 16 ms after activation, while gravity alone takes
+  // 4.3 s -- and it does so for either sign of the feedback loop. Hardware
+  // survives it only because a person is holding the robot while it burns off.
+  //
+  // So it is reproduced only when asked for. Left on, every run dies in the
+  // lurch and the sweep reports 0% for every gain set, measuring the startup
+  // sequence instead of the gains. `reproduce_startup_windup` turns it back on
+  // to quantify what it costs, which is a question worth asking separately.
+  if (reproduce_startup_windup_) {
+    pid_->initialize(0.0, 0.0);
+    // The firmware's `input` reads 0 until the first packet, so the coast gate
+    // holds while the integrator winds.
+    std::fill(pitch_delay_buffer_.begin(), pitch_delay_buffer_.end(), 0.0);
+  } else {
+    // Deferred: initialised from the first real reading in update(), which is
+    // what SetMode(AUTOMATIC) would capture if it ran once DMP data were
+    // flowing. The buffer is filled to match, so the first cycle sees no
+    // derivative step either.
+    pid_initialised_ = false;
+  }
   delay_write_index_ = 0;
 
   previous_pitch_deg_ = 0.0;
@@ -484,6 +500,18 @@ controller_interface::return_type BalanceController::update(
   previous_pitch_rate_deg_s_ = pitch_rate_deg_s;
   if (pitch_history_depth_ < 2) {
     ++pitch_history_depth_;
+  }
+
+  // Deferred initialisation: seed the PID and the whole delay buffer from the
+  // first real reading, so neither a wound integrator nor a phantom derivative
+  // step exists on the first commanded cycle.
+  if (!pid_initialised_) {
+    pid_->initialize(pitch_deg, 0.0);
+    std::fill(pitch_delay_buffer_.begin(), pitch_delay_buffer_.end(), pitch_deg);
+    previous_pitch_deg_ = pitch_deg;
+    previous_pitch_rate_deg_s_ = 0.0;
+    pitch_history_depth_ = 0;
+    pid_initialised_ = true;
   }
 
   // Transport delay first: the noise rides on the delayed sample, not the other
