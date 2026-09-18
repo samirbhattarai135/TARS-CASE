@@ -2,14 +2,13 @@
 #define AUDIO_INPUT_H
 
 #include <Arduino.h>
+#include "i2s_bus.h"
 
-// INMP441 I2S microphone pin configuration
-#define I2S_MIC_SCK   GPIO_NUM_32   // Bit clock
-#define I2S_MIC_WS    GPIO_NUM_15   // Word select
-#define I2S_MIC_SD    GPIO_NUM_4    // Data from mic
+// The INMP441's clock and data pins, its sample rate and its slot format all
+// come from i2s_bus.h, because the amplifier shares them.
 
-#define MIC_SAMPLE_RATE   16000     // 16 kHz sampling for voice
-#define MIC_BUFFER_SIZE   512       // Samples per read
+#define MIC_SAMPLE_RATE   I2S_SAMPLE_RATE
+#define MIC_BUFFER_SIZE   512       // Mono samples per read
 
 class AudioInput {
 public:

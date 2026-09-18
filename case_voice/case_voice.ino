@@ -6,16 +6,20 @@
  * - Core 1 (High Priority): Balance control loop (~100Hz, never blocked)
  * - Core 0 (Normal Priority): Audio processing + AI interaction
  *
- * Hardware:
+ * Hardware (the Self_balance board; build_board.py holds the net map):
  * - ESP32-WROOM-32
- * - MPU6050 IMU (I2C: GPIO 21/22)
- * - TB6612FNG Motor Driver
- * - INMP441 I2S Microphone (I2S1 RX: GPIO 32/15/4)
- * - MAX98357A I2S Amplifier (I2S0 TX: GPIO 26/25/27)
+ * - MPU6050 IMU (I2C: GPIO 21/22, INT on 35)
+ * - TB6612FNG Motor Driver (PWMA/AIN1/AIN2 25/26/27,
+ *                           PWMB/BIN1/BIN2 14/13/32, STBY 33)
+ * - INMP441 I2S Microphone    (data in  on GPIO 34)
+ * - MAX98357A I2S Amplifier   (data out on GPIO 23, SD_MODE on 4)
+ *
+ * The microphone and the amplifier share BCLK (18) and WS (19), so both run
+ * on one I2S port in full duplex rather than one port each. See i2s_bus.h.
  *
  * Audio pipeline:
- *   INMP441 → I2S1 → ESP32 → WiFi → Personaplex AI (Colab)
- *   Personaplex AI → WiFi → ESP32 → I2S0 → MAX98357A → Speaker
+ *   INMP441 → I2S RX → ESP32 → WiFi → Personaplex AI (Colab)
+ *   Personaplex AI → WiFi → ESP32 → I2S TX → MAX98357A → Speaker
  */
 
 #include "balance_control.h"
