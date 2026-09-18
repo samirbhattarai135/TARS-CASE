@@ -73,9 +73,25 @@ motor:
   resistance_ohm:
     nominal: 5.45
     range: [3.0, 8.0]
+  # Voltage at the MOTOR TERMINALS at full duty, not the pack voltage. The
+  # torque equation in src/motor_model.hpp applies this straight across the
+  # motor, so whatever the H-bridge drops has to come off here or the model
+  # gives the robot torque the hardware cannot deliver.
+  #
+  #   2S LiPo:            6.4 V discharged .. 8.4 V fully charged
+  #   TB6612FNG drop:     about 0.5 V, from roughly 0.25 ohm per side at 1 A
+  #   at the terminals:   5.9 V .. 7.9 V, nominal 7.4 - 0.5 = 6.9
+  #
+  # This was 7.4 V with no drop subtracted, which described neither board: the
+  # one built at the time was an L298N on 3S, dropping 2-3 V from 11.1 V. The
+  # 2026-09-17 revision to a TB6612FNG on 2S is what makes a 0.5 V allowance
+  # the right correction.
+  #
+  # CALIBRATE: measure across the motor terminals at full duty under load; that
+  # one number replaces the pack estimate and the drop estimate together.
   supply_voltage_v:
-    nominal: 7.4
-    range: [7.0, 8.4]      # 2S LiPo, discharged to fully charged
+    nominal: 6.9
+    range: [5.9, 7.9]
 
 sensor:
   # Transport delay is the most influential parameter in this block: derivative
