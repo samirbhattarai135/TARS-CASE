@@ -9,16 +9,20 @@ MPU6050 mpu;
 #define SDA_PIN 21
 #define SCL_PIN 22
 
-// MPU6050 interrupt pin
-#define MPU_INT_PIN 2
+// MPU6050 interrupt pin. Input-only GPIO, which is all an interrupt needs,
+// and it keeps the IMU off the IO2 strapping pin.
+#define MPU_INT_PIN 35
 
-// TB6612FNG Motor Driver pins
+// TB6612FNG Motor Driver pins. These follow the Self_balance board, whose net
+// map in build_board.py is the authoritative record; the same numbers are
+// duplicated in case_voice/balance_control.cpp because Arduino keeps the two
+// sketches separate.
 #define PWMA 25      // Motor A speed (PWM)
 #define AIN1 26      // Motor A direction
 #define AIN2 27      // Motor A direction
 #define PWMB 14      // Motor B speed (PWM)
-#define BIN1 12      // Motor B direction
-#define BIN2 13      // Motor B direction
+#define BIN1 13      // Motor B direction
+#define BIN2 32      // Motor B direction — IO32, not the IO12 strapping pin
 #define STBY 33      // Standby pin - must be HIGH to enable driver
 
 // MPU control/status vars
@@ -56,7 +60,6 @@ void IRAM_ATTR dmpDataReady()
 {
     mpuInterrupt = true;
 }
-
 
 void scanI2C() {
   Serial.println(F("Scanning I2C bus..."));
